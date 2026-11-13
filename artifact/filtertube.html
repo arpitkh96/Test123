@@ -332,6 +332,7 @@ function card({ v, ev }) {
   if (v.source?.label) why.push(`<span>${esc(v.source.type === "topic" ? "Topic: " + v.source.label : v.source.type === "trending" ? "Trending" : "Channel you follow")}</span>`);
   for (const r of ev.boosts) why.push(`<span class="pill ${r.action === "boost" ? "boost" : ""}">${esc(r.action === "boost" ? "Boosted" : "Lowered")}: ${esc(r.text)}</span>`);
   if (ev.overridden) why.push(`<span class="pill block">Shown anyway</span>`);
+  if (v.example) why.unshift(`<span class="pill">Example</span>`);
   return `<article class="card">
     <a class="thumb" href="${watchUrl(v.id)}" target="_blank" rel="noopener" data-watch="${esc(v.id)}">${thumbHtml(v)}${v.durationSec ? `<span class="dur">${v.isLive ? "LIVE" : fmtDur(v.durationSec)}</span>` : ""}${p.watched[v.id] ? '<span class="watched-bar"></span>' : ""}</a>
     <div class="meta">
@@ -504,6 +505,7 @@ function bindView() {
     const t = e.target.closest("[data-watch],[data-like],[data-nope],[data-override],[data-undo],[data-delsrc],[data-mode],#compileBtn,#stopCompile,#followQ");
     if (!t) return;
     const p = state.prefs;
+    if (t.dataset.watch && state.videos.get(t.dataset.watch)?.example) { e.preventDefault(); return; }
     if (t.dataset.watch) { const id = t.dataset.watch; if (!p.watched[id]) bumpChannel(state.videos.get(id), 0.5); p.watched[id] = Date.now(); trimWatched(); savePrefs(); setTimeout(render, 50); return; }
     if (t.dataset.like) { const id = t.dataset.like, v = state.videos.get(id); if (p.liked[id]) { delete p.liked[id]; bumpChannel(v, -1.5); } else { p.liked[id] = true; bumpChannel(v, 1.5); } savePrefs(); render(); return; }
     if (t.dataset.nope) { const id = t.dataset.nope; p.notInterested[id] = true; bumpChannel(state.videos.get(id), -2); savePrefs(); render(); return; }
