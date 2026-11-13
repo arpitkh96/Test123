@@ -1,0 +1,669 @@
+<title>FilterTube</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Manrope:wght@500;700;800&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: sticky top bar with view tabs; feed is a responsive card grid; rules/sources/hidden are single reading columns. */
+:root {
+  --bg: #f5f6f8;
+  --surface: #ffffff;
+  --sunk: #eceef2;
+  --ink: #15191f;
+  --muted: #5d6573;
+  --line: #dde1e7;
+  --accent: #0f6e66;
+  --accent-ink: #ffffff;
+  --accent-soft: #dcefec;
+  --block: #b42318;
+  --block-soft: #fde8e6;
+  --boost: #7a5a00;
+  --boost-soft: #fbf1d3;
+  --font-display: "Manrope", "Inter", system-ui, sans-serif;
+  --font-body: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+  --radius: 10px;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0f1215; --surface: #171b20; --sunk: #1f242a; --ink: #e6e9ee; --muted: #98a1ae; --line: #2a3038;
+    --accent: #3cc3b4; --accent-ink: #062320; --accent-soft: #143430;
+    --block: #ff8a7a; --block-soft: #3a1a17; --boost: #f0c75e; --boost-soft: #33290f;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0f1215; --surface: #171b20; --sunk: #1f242a; --ink: #e6e9ee; --muted: #98a1ae; --line: #2a3038;
+  --accent: #3cc3b4; --accent-ink: #062320; --accent-soft: #143430;
+  --block: #ff8a7a; --block-soft: #3a1a17; --boost: #f0c75e; --boost-soft: #33290f;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body { background: var(--bg); color: var(--ink); font-family: var(--font-body); font-size: 14px; line-height: 1.5; }
+body::before { content: ""; position: fixed; inset: 0 0 auto; height: env(safe-area-inset-top, 0px); z-index: 10; background: var(--surface); }
+button, input, select, textarea { font: inherit; color: inherit; }
+button { cursor: pointer; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.wrap { padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); max-width: 1440px; margin: 0 auto; }
+
+/* Top bar */
+.top { position: sticky; top: env(safe-area-inset-top, 0px); z-index: 5; background: var(--surface); border-bottom: 1px solid var(--line); }
+.top .wrap { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 20px; padding-block: 12px; }
+.brand { display: flex; align-items: center; gap: 10px; font-family: var(--font-display); font-weight: 800; font-size: 19px; letter-spacing: -0.02em; text-decoration: none; color: var(--ink); }
+.brand-mark { width: 26px; height: 26px; border-radius: 7px; background: var(--accent); display: grid; place-items: center; }
+.brand-mark svg { display: block; }
+.search { flex: 1 1 260px; min-width: 0; display: flex; }
+.search input { width: 100%; border: 1px solid var(--line); background: var(--sunk); border-radius: 999px; padding: 8px 16px; }
+.tabs { display: flex; gap: 4px; flex-wrap: wrap; }
+.tab { border: 0; background: transparent; padding: 7px 12px; border-radius: 999px; color: var(--muted); font-weight: 600; text-decoration: none; display: inline-flex; gap: 6px; align-items: center; }
+.tab[aria-current="page"] { background: var(--ink); color: var(--bg); }
+.count { font-family: var(--font-mono); font-size: 11px; font-weight: 500; padding: 0 6px; border-radius: 999px; background: var(--sunk); color: var(--muted); }
+.tab[aria-current="page"] .count { background: var(--muted); color: var(--bg); }
+
+/* Status strip */
+.strip { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; padding-block: 10px; color: var(--muted); font-size: 13px; }
+.strip .chip { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px; background: var(--surface); border: 1px solid var(--line); }
+.dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); }
+.dot.on { background: var(--accent); }
+.dot.busy { background: var(--boost); animation: pulse 1s infinite alternate; }
+@keyframes pulse { to { opacity: .3 } }
+@media (prefers-reduced-motion: reduce) { .dot.busy { animation: none; } }
+.linkbtn { border: 0; background: none; color: var(--accent); font-weight: 600; padding: 0; }
+
+/* Feed grid */
+main { padding-block: 4px 48px; }
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 28px 18px; }
+.card { min-width: 0; display: flex; flex-direction: column; gap: 10px; }
+.thumb { position: relative; display: block; aspect-ratio: 16 / 9; max-width: 100%; border-radius: var(--radius); overflow: hidden; background: var(--sunk); }
+.thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.thumb .ph { position: absolute; inset: 0; display: grid; place-items: center; font-family: var(--font-display); font-weight: 800; font-size: 28px; color: var(--muted); }
+.dur { position: absolute; right: 8px; bottom: 8px; background: rgba(0,0,0,.78); color: #fff; font-family: var(--font-mono); font-size: 12px; padding: 1px 6px; border-radius: 5px; }
+.watched-bar { position: absolute; left: 0; right: 0; bottom: 0; height: 3px; background: var(--accent); }
+.meta { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.title { font-weight: 600; font-size: 15px; line-height: 1.35; color: var(--ink); text-decoration: none; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.title:hover { text-decoration: underline; }
+.sub { color: var(--muted); font-size: 13px; overflow-wrap: anywhere; }
+.why { font-size: 12px; color: var(--muted); display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+.pill { font-size: 11px; font-weight: 600; letter-spacing: .02em; padding: 1px 8px; border-radius: 999px; background: var(--sunk); color: var(--muted); }
+.pill.boost { background: var(--boost-soft); color: var(--boost); }
+.pill.block { background: var(--block-soft); color: var(--block); }
+.pill.allow { background: var(--accent-soft); color: var(--accent); }
+.actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.act { border: 1px solid var(--line); background: var(--surface); border-radius: 999px; padding: 3px 10px; font-size: 12px; color: var(--muted); }
+.act:hover { color: var(--ink); border-color: var(--muted); }
+.act[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); border-color: transparent; }
+
+/* Panels */
+.col { max-width: 760px; display: flex; flex-direction: column; gap: 20px; }
+h1, h2 { font-family: var(--font-display); letter-spacing: -0.02em; text-wrap: balance; margin: 0; }
+h1 { font-size: 26px; font-weight: 800; }
+h2 { font-size: 17px; font-weight: 700; }
+.lede { color: var(--muted); margin: 0; max-width: 62ch; }
+.panel { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 18px; display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+textarea { width: 100%; min-height: 150px; resize: vertical; border: 1px solid var(--line); border-radius: 8px; background: var(--sunk); padding: 12px 14px; line-height: 1.55; }
+.row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+.btn { border: 0; border-radius: 999px; padding: 8px 18px; font-weight: 600; background: var(--accent); color: var(--accent-ink); }
+.btn:disabled { opacity: .55; cursor: default; }
+.btn.ghost { background: transparent; color: var(--ink); border: 1px solid var(--line); }
+.note { font-size: 13px; color: var(--muted); }
+.note.err { color: var(--block); }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 999px; padding: 2px; background: var(--sunk); }
+.seg button { border: 0; background: transparent; border-radius: 999px; padding: 4px 12px; font-size: 13px; color: var(--muted); font-weight: 600; }
+.seg button[aria-pressed="true"] { background: var(--surface); color: var(--ink); box-shadow: 0 1px 2px rgba(0,0,0,.08); }
+.rulelist { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+.rule { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; align-items: start; padding: 12px 14px; border-radius: 8px; background: var(--sunk); }
+.rule .pill { margin-top: 2px; text-transform: uppercase; }
+.rule .txt { min-width: 0; }
+.rule .cond { grid-column: 2; font-family: var(--font-mono); font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
+.rule.off { opacity: .55; }
+.list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
+.list li { display: flex; gap: 12px; align-items: center; padding: 10px 0; border-top: 1px solid var(--line); min-width: 0; }
+.list li:first-child { border-top: 0; }
+.list .grow { flex: 1; min-width: 0; }
+.list .mini { width: 96px; flex: none; aspect-ratio: 16/9; border-radius: 6px; overflow: hidden; background: var(--sunk); }
+.list .mini img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.empty { padding: 40px 20px; text-align: center; color: var(--muted); border: 1px dashed var(--line); border-radius: var(--radius); display: flex; flex-direction: column; gap: 10px; align-items: center; }
+.empty h2 { color: var(--ink); }
+.addform { display: grid; grid-template-columns: auto 1fr auto; gap: 8px; }
+.addform input, .addform select { border: 1px solid var(--line); background: var(--sunk); border-radius: 8px; padding: 7px 10px; min-width: 0; }
+@media (max-width: 560px) { .addform { grid-template-columns: 1fr; } }
+code { font-family: var(--font-mono); font-size: 12px; background: var(--sunk); padding: 1px 5px; border-radius: 4px; }
+</style>
+
+<header class="top">
+  <div class="wrap">
+    <a class="brand" href="#feed" aria-label="FilterTube home">
+      <span class="brand-mark" aria-hidden="true"><svg width="14" height="14" viewBox="0 0 14 14"><path d="M1 2h12L8.5 7.5V12L5.5 10.5V7.5Z" fill="var(--accent-ink)"/></svg></span>
+      FilterTube
+    </a>
+    <form class="search" role="search" id="searchForm">
+      <input id="q" type="search" placeholder="Search your filtered feed" aria-label="Search your filtered feed">
+    </form>
+    <nav class="tabs" aria-label="Views">
+      <a class="tab" href="#feed" data-view="feed">Feed</a>
+      <a class="tab" href="#rules" data-view="rules">Rules <span class="count" id="nRules">0</span></a>
+      <a class="tab" href="#sources" data-view="sources">Sources <span class="count" id="nSources">0</span></a>
+      <a class="tab" href="#hidden" data-view="hidden">Hidden <span class="count" id="nHidden">0</span></a>
+    </nav>
+  </div>
+</header>
+
+<div class="wrap">
+  <div class="strip" id="strip" aria-live="polite"></div>
+  <main id="main"></main>
+</div>
+
+<script>
+"use strict";
+/* ------------------------------------------------------------------ *
+ * FilterTube: a YouTube feed filtered by rules written in plain English.
+ * Videos are written into the `videos` collection by a Claude session
+ * using the YouTube Data API (this page cannot reach YouTube itself).
+ * Rules are compiled by Claude into structured filters; topic-style
+ * conditions are checked by Claude in batches and cached in `labels`.
+ * ------------------------------------------------------------------ */
+
+const DAYS = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
+const DEFAULT_TEXT =
+`No Shorts.
+Hide celebrity gossip, drama and reaction videos.
+Hide clickbait titles.
+Nothing longer than 2 hours.
+Show more programming and science.`;
+/* Starter rules (precompiled so Shorts are filtered before Claude is ever asked). */
+const DEFAULT_COMPILED = { rules: [
+  { id: "r1", action: "block", text: "Hide Shorts", when: { is_short: true } },
+  { id: "r2", action: "block", text: "Hide celebrity gossip, drama and reaction videos", when: { about: ["celebrity gossip or influencer drama", "reaction video"] } },
+  { id: "r3", action: "block", text: "Hide clickbait titles", when: { about: ["clickbait title (exaggerated, misleading or withholding to bait clicks)"] } },
+  { id: "r4", action: "block", text: "Hide videos longer than 2 hours", when: { min_minutes: 120 } },
+  { id: "r5", action: "boost", text: "Rank programming and science higher", when: { about: ["programming or software engineering", "science"] } },
+], notes: "" };
+
+const state = {
+  view: "feed",
+  q: "",
+  videos: new Map(),     // id -> video
+  labels: new Map(),     // id -> {critKey: bool}
+  sources: [],
+  meta: null,
+  prefs: { rulesText: DEFAULT_TEXT, compiled: DEFAULT_COMPILED, mode: "strict", channels: {}, watched: {}, liked: {}, notInterested: {}, override: {} },
+  prefsLoaded: false,
+  dbState: "connecting",   // connecting | live | offline | none
+  classify: { running: false, done: 0, error: "", paused: false, budget: 30 },
+  compile: { running: false, error: "" },
+};
+let db = null, sample = null, uid = null, prefsRef = null;
+
+/* ---------- helpers ---------- */
+const $ = (s, r = document) => r.querySelector(s);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const critKey = (s) => String(s).toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "").slice(0, 80) || "x";
+function fmtDur(sec) {
+  if (!sec && sec !== 0) return "";
+  const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = Math.floor(sec % 60);
+  return h ? `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}` : `${m}:${String(s).padStart(2, "0")}`;
+}
+function fmtViews(n) {
+  if (n == null) return "";
+  if (n >= 1e9) return (n / 1e9).toFixed(1).replace(/\.0$/, "") + "B views";
+  if (n >= 1e6) return (n / 1e6).toFixed(1).replace(/\.0$/, "") + "M views";
+  if (n >= 1e3) return Math.round(n / 1e3) + "K views";
+  return n + " views";
+}
+function ago(iso) {
+  const d = (Date.now() - Date.parse(iso)) / 1000;
+  if (!isFinite(d)) return "";
+  const u = [[31536000, "year"], [2592000, "month"], [604800, "week"], [86400, "day"], [3600, "hour"], [60, "minute"]];
+  for (const [s, n] of u) if (d >= s) { const k = Math.floor(d / s); return `${k} ${n}${k > 1 ? "s" : ""} ago`; }
+  return "just now";
+}
+const watchUrl = (id) => `https://www.youtube-nocookie.com/embed/${encodeURIComponent(id)}?autoplay=1&rel=0&modestbranding=1`;
+function lsGet(k) { try { return JSON.parse(localStorage.getItem(k)); } catch { return null; } }
+function lsSet(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} }
+
+/* ---------- rule engine ---------- */
+function sanitizeCompiled(raw) {
+  const out = { rules: [], notes: typeof raw?.notes === "string" ? raw.notes : "" };
+  const list = Array.isArray(raw?.rules) ? raw.rules : [];
+  list.forEach((r, i) => {
+    if (!r || typeof r !== "object") return;
+    const action = ["block", "allow_only", "boost", "demote"].includes(r.action) ? r.action : null;
+    if (!action) return;
+    const w = r.when && typeof r.when === "object" ? r.when : {};
+    const when = {};
+    if (typeof w.is_short === "boolean") when.is_short = w.is_short;
+    if (typeof w.is_live === "boolean") when.is_live = w.is_live;
+    for (const k of ["min_minutes", "max_minutes", "max_age_days", "min_age_days"]) if (Number.isFinite(+w[k]) && w[k] !== null && w[k] !== "") when[k] = +w[k];
+    for (const k of ["channels", "keywords", "about"]) if (Array.isArray(w[k])) { const a = w[k].map(String).map((s) => s.trim()).filter(Boolean).slice(0, 12); if (a.length) when[k] = a; }
+    let schedule = null;
+    if (r.schedule && typeof r.schedule === "object") {
+      const s = r.schedule; schedule = {};
+      if (Array.isArray(s.days)) schedule.days = s.days.map((d) => String(d).slice(0, 3).toLowerCase()).filter((d) => DAYS.includes(d));
+      for (const k of ["from", "to"]) if (/^\d{1,2}:\d{2}$/.test(s[k] || "")) schedule[k] = s[k].padStart(5, "0");
+      if (!Object.keys(schedule).length) schedule = null;
+    }
+    if (!Object.keys(when).length) return;
+    out.rules.push({ id: "r" + (i + 1), action, text: String(r.text || "").slice(0, 200) || action, when, schedule });
+  });
+  return out;
+}
+function ruleActive(r, now = new Date()) {
+  const s = r.schedule; if (!s) return true;
+  if (s.days?.length && !s.days.includes(DAYS[now.getDay()])) return false;
+  const hm = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
+  if (s.from && s.to) return s.from <= s.to ? hm >= s.from && hm < s.to : hm >= s.from || hm < s.to;
+  if (s.from) return hm >= s.from;
+  if (s.to) return hm < s.to;
+  return true;
+}
+/* true / false / null (needs Claude to decide an "about" condition) */
+function matchWhen(w, v, lab) {
+  const mins = (v.durationSec || 0) / 60, ageDays = (Date.now() - Date.parse(v.publishedAt)) / 864e5;
+  if ("is_short" in w && !!v.isShort !== w.is_short) return false;
+  if ("is_live" in w && !!v.isLive !== w.is_live) return false;
+  if ("min_minutes" in w && !(mins >= w.min_minutes)) return false;
+  if ("max_minutes" in w && !(mins <= w.max_minutes)) return false;
+  if ("max_age_days" in w && !(ageDays <= w.max_age_days)) return false;
+  if ("min_age_days" in w && !(ageDays >= w.min_age_days)) return false;
+  if (w.channels) { const c = (v.channel || "").toLowerCase(); if (!w.channels.some((x) => c.includes(x.toLowerCase()))) return false; }
+  if (w.keywords) { const hay = `${v.title} ${(v.tags || []).join(" ")} ${v.description || ""}`.toLowerCase(); if (!w.keywords.some((k) => hay.includes(k.toLowerCase()))) return false; }
+  if (!w.about) return true;
+  let unknown = false;
+  for (const a of w.about) { const x = lab?.[critKey(a)]; if (x === true) return true; if (x === undefined) unknown = true; }
+  return unknown ? null : false;
+}
+function evaluate(v) {
+  const p = state.prefs, lab = state.labels.get(v.id);
+  const rules = (p.compiled?.rules || []).filter((r) => ruleActive(r));
+  const res = { status: "show", reasons: [], boosts: [], need: new Set() };
+  if (p.notInterested[v.id]) { res.status = "hide"; res.reasons.push({ text: "You marked this Not interested", kind: "user" }); return res; }
+  let allowRules = 0, allowHit = false, allowUnknown = false;
+  for (const r of rules) {
+    const m = matchWhen(r.when, v, lab);
+    if (m === null) (r.when.about || []).forEach((a) => { if (lab?.[critKey(a)] === undefined) res.need.add(a); });
+    if (r.action === "block") {
+      if (m === true) { res.status = "hide"; res.reasons.push({ text: r.text, kind: "block" }); }
+      else if (m === null && p.mode === "strict" && res.status !== "hide") res.status = "pending";
+    } else if (r.action === "allow_only") {
+      allowRules++; if (m === true) allowHit = true; else if (m === null) allowUnknown = true;
+    } else if (m === true) res.boosts.push(r);
+  }
+  if (allowRules && !allowHit && res.status !== "hide") {
+    if (allowUnknown) { if (p.mode === "strict") res.status = "pending"; }
+    else { res.status = "hide"; res.reasons.push({ text: "Not in your allowed topics right now", kind: "allow" }); }
+  }
+  if (res.status === "hide" && p.override[v.id]) { res.status = "show"; res.overridden = true; }
+  return res;
+}
+function score(v, ev) {
+  const p = state.prefs;
+  const age = Math.max(0, (Date.now() - Date.parse(v.publishedAt)) / 864e5);
+  let s = 3 * Math.exp(-age / 10);
+  s += Math.max(-4, Math.min(4, p.channels[v.channelId] || 0));
+  s += v.source?.type === "channel" ? 1 : v.source?.type === "topic" ? 0.6 : 0;
+  for (const r of ev.boosts) s += r.action === "boost" ? 2.5 : -2.5;
+  if (p.watched[v.id]) s -= 3;
+  return s;
+}
+
+/* ---------- derived view ---------- */
+function compute() {
+  const shown = [], hidden = [], pending = [], need = new Map();
+  const q = state.q.trim().toLowerCase();
+  for (const v of state.videos.values()) {
+    const ev = evaluate(v);
+    if (ev.need.size && ev.status !== "hide") need.set(v.id, ev.need);
+    if (ev.status === "hide") hidden.push({ v, ev });
+    else if (ev.status === "pending") pending.push({ v, ev });
+    else if (!q || `${v.title} ${v.channel}`.toLowerCase().includes(q)) shown.push({ v, ev, s: score(v, ev) });
+  }
+  shown.sort((a, b) => b.s - a.s);
+  hidden.sort((a, b) => Date.parse(b.v.publishedAt) - Date.parse(a.v.publishedAt));
+  return { shown, hidden, pending, need };
+}
+
+/* ---------- rendering ---------- */
+function thumbHtml(v, cls = "thumb") {
+  const inner = v.thumb ? `<img src="${esc(v.thumb)}" alt="" loading="lazy">` : `<span class="ph">${esc((v.channel || "?").slice(0, 1))}</span>`;
+  return inner;
+}
+function card({ v, ev }) {
+  const p = state.prefs;
+  const why = [];
+  if (v.source?.label) why.push(`<span>${esc(v.source.type === "topic" ? "Topic: " + v.source.label : v.source.type === "trending" ? "Trending" : "Channel you follow")}</span>`);
+  for (const r of ev.boosts) why.push(`<span class="pill ${r.action === "boost" ? "boost" : ""}">${esc(r.action === "boost" ? "Boosted" : "Lowered")}: ${esc(r.text)}</span>`);
+  if (ev.overridden) why.push(`<span class="pill block">Shown anyway</span>`);
+  return `<article class="card">
+    <a class="thumb" href="${watchUrl(v.id)}" target="_blank" rel="noopener" data-watch="${esc(v.id)}">${thumbHtml(v)}${v.durationSec ? `<span class="dur">${v.isLive ? "LIVE" : fmtDur(v.durationSec)}</span>` : ""}${p.watched[v.id] ? '<span class="watched-bar"></span>' : ""}</a>
+    <div class="meta">
+      <a class="title" href="${watchUrl(v.id)}" target="_blank" rel="noopener" data-watch="${esc(v.id)}">${esc(v.title)}</a>
+      <div class="sub">${esc(v.channel)} · ${esc(fmtViews(v.views))}${v.views != null ? " · " : ""}${esc(ago(v.publishedAt))}</div>
+      ${why.length ? `<div class="why">${why.join("")}</div>` : ""}
+    </div>
+    <div class="actions">
+      <button class="act" data-like="${esc(v.id)}" aria-pressed="${!!p.liked[v.id]}">${p.liked[v.id] ? "Liked" : "Like"}</button>
+      <button class="act" data-nope="${esc(v.id)}">Not interested</button>
+    </div>
+  </article>`;
+}
+
+function renderStrip(c) {
+  const k = state.classify, n = state.videos.size;
+  const dbChip = { connecting: '<span class="dot busy"></span>Connecting to your feed…', live: '<span class="dot on"></span>Feed connected', offline: '<span class="dot"></span>Can’t reach the feed yet', none: '<span class="dot"></span>Saved data unavailable here' }[state.dbState];
+  let cls = "";
+  if (c.need.size && !sample) cls = `<span class="chip"><span class="dot"></span>${c.need.size} videos wait for topic checks (Claude isn’t available in this view)</span>`;
+  else if (k.error) cls = `<span class="chip"><span class="dot"></span>${esc(k.error)}</span>`;
+  else if (k.running) cls = `<span class="chip"><span class="dot busy"></span>Claude is checking ${c.need.size} videos against your rules</span>`;
+  else if (k.paused && c.need.size) cls = `<span class="chip"><span class="dot"></span>${c.need.size} videos not checked yet <button class="linkbtn" id="resume">Check them</button></span>`;
+  const last = state.meta?.lastRun ? `Refreshed ${ago(state.meta.lastRun)}` : "";
+  $("#strip").innerHTML = `<span class="chip">${dbChip}</span>
+    <span>${c.shown.length} shown · ${c.hidden.length} hidden${c.pending.length ? ` · ${c.pending.length} being checked` : ""} of ${n}</span>
+    ${cls}${last ? `<span>${esc(last)}</span>` : ""}`;
+  const r = $("#resume"); if (r) r.onclick = () => { state.classify.paused = false; state.classify.budget = 30; pump(); };
+}
+
+function render() {
+  const c = compute();
+  document.querySelectorAll(".tab").forEach((t) => t.setAttribute("aria-current", t.dataset.view === state.view ? "page" : "false"));
+  $("#nRules").textContent = (state.prefs.compiled?.rules || []).length;
+  $("#nSources").textContent = state.sources.length;
+  $("#nHidden").textContent = c.hidden.length;
+  renderStrip(c);
+  const m = $("#main");
+  const ae = document.activeElement;
+  if (ae && m.contains(ae) && /^(TEXTAREA|INPUT|SELECT)$/.test(ae.tagName) && m.dataset.view === state.view) { queueClassify(c); return; }
+  m.dataset.view = state.view;
+  if (state.view === "rules") m.innerHTML = rulesView();
+  else if (state.view === "sources") m.innerHTML = sourcesView();
+  else if (state.view === "hidden") m.innerHTML = hiddenView(c);
+  else m.innerHTML = feedView(c);
+  bindView();
+  queueClassify(c);
+}
+
+function feedView(c) {
+  if (!state.videos.size) {
+    return `<div class="empty">
+      <h2>${state.dbState === "connecting" ? "Loading your feed…" : "No videos yet"}</h2>
+      <p class="lede">Claude fills this feed from the channels and topics under <a href="#sources">Sources</a>, using the YouTube Data API. Your <a href="#rules">rules</a> already apply to everything that arrives.</p>
+    </div>`;
+  }
+  if (!c.shown.length) {
+    return `<div class="empty"><h2>${state.q ? "Nothing in your feed matches that search" : "Your rules hide everything right now"}</h2>
+      <p class="lede">${state.q ? "Try different words, or add it as a topic under Sources so the next refresh brings videos about it." : "See what was hidden and why under Hidden, or loosen a rule."}</p>
+      ${state.q ? `<button class="btn" id="followQ">Follow “${esc(state.q)}” as a topic</button>` : ""}</div>`;
+  }
+  return `<section class="grid" aria-label="Your feed">${c.shown.map(card).join("")}</section>`;
+}
+
+function describeWhen(w) {
+  const parts = [];
+  if ("is_short" in w) parts.push(w.is_short ? "is a Short" : "is not a Short");
+  if ("is_live" in w) parts.push(w.is_live ? "is live" : "is not live");
+  if ("min_minutes" in w) parts.push(`≥ ${w.min_minutes} min`);
+  if ("max_minutes" in w) parts.push(`≤ ${w.max_minutes} min`);
+  if ("max_age_days" in w) parts.push(`uploaded in the last ${w.max_age_days} days`);
+  if ("min_age_days" in w) parts.push(`older than ${w.min_age_days} days`);
+  if (w.channels) parts.push(`channel: ${w.channels.join(" / ")}`);
+  if (w.keywords) parts.push(`mentions: ${w.keywords.join(" / ")}`);
+  if (w.about) parts.push(`about: ${w.about.join(" / ")}`);
+  return parts.join("  ·  ");
+}
+function describeSchedule(s) {
+  if (!s) return "";
+  const d = s.days?.length ? s.days.map((x) => x[0].toUpperCase() + x.slice(1)).join(", ") : "Every day";
+  const t = s.from && s.to ? ` ${s.from}–${s.to}` : s.from ? ` from ${s.from}` : s.to ? ` until ${s.to}` : "";
+  return d + t;
+}
+function rulesView() {
+  const p = state.prefs, cs = state.compile;
+  const label = { block: ["Hide", "block"], allow_only: ["Only", "allow"], boost: ["Boost", "boost"], demote: ["Lower", ""] };
+  const rules = p.compiled?.rules || [];
+  return `<div class="col">
+    <div><h1>Your rules</h1><p class="lede">Write what you want your feed to be, in your own words, one idea per line. Claude turns it into the filters below, which run on every video before you see it.</p></div>
+    <section class="panel">
+      <label for="rulesText"><h2>In your words</h2></label>
+      <textarea id="rulesText" spellcheck="true">${esc(p.rulesText)}</textarea>
+      <div class="row">
+        <button class="btn" id="compileBtn" ${cs.running || !sample ? "disabled" : ""}>${cs.running ? "Claude is reading your rules…" : "Apply rules"}</button>
+        ${cs.running ? '<button class="btn ghost" id="stopCompile">Stop</button>' : ""}
+        <span class="note ${cs.error ? "err" : ""}" id="compileNote">${esc(cs.error || (!sample ? "Applying new rules needs Claude, which isn’t available in this view." : "Examples: “No Shorts on weekdays”, “Only cooking and history before 9pm”, “Hide anything from Channel X”."))}</span>
+      </div>
+    </section>
+    <section class="panel">
+      <div class="row" style="justify-content:space-between">
+        <h2>What Claude understood</h2>
+        <div class="seg" role="group" aria-label="Unchecked videos">
+          <button data-mode="strict" aria-pressed="${p.mode === "strict"}">Hide until checked</button>
+          <button data-mode="lenient" aria-pressed="${p.mode === "lenient"}">Show until checked</button>
+        </div>
+      </div>
+      ${rules.length ? `<ul class="rulelist">${rules.map((r) => {
+        const [lab, cls] = label[r.action]; const on = ruleActive(r);
+        return `<li class="rule ${on ? "" : "off"}"><span class="pill ${cls}">${lab}</span><span class="txt">${esc(r.text)}${r.schedule ? ` <span class="note">(${esc(describeSchedule(r.schedule))}${on ? "" : ", not active now"})</span>` : ""}</span><span class="cond">${esc(describeWhen(r.when))}</span></li>`;
+      }).join("")}</ul>` : '<p class="note">No rules yet: every video is shown.</p>'}
+      ${p.compiled?.notes ? `<p class="note">Claude’s note: ${esc(p.compiled.notes)}</p>` : ""}
+      <p class="note">Conditions marked <code>about:</code> are checked by Claude from each video’s title, channel and description, once per video. The rest are checked instantly.</p>
+    </section>
+  </div>`;
+}
+
+function sourcesView() {
+  const st = { pending: ["Waiting for next refresh", ""], active: ["Active", "allow"], error: ["Problem", "block"] };
+  return `<div class="col">
+    <div><h1>Sources</h1><p class="lede">There is no YouTube algorithm here, so your feed is built from these: new uploads from channels you follow, videos about topics you care about, and trending videos if you want them. Ranking then favours fresh videos, channels you like, and anything your rules boost.</p></div>
+    <section class="panel">
+      <h2>Add a source</h2>
+      <form class="addform" id="addForm">
+        <select id="srcType" aria-label="Source type"><option value="channel">Channel</option><option value="topic">Topic</option><option value="trending">Trending in region</option></select>
+        <input id="srcValue" placeholder="@handle or channel link" aria-label="Channel, topic or region" required>
+        <button class="btn" type="submit" ${db ? "" : "disabled"}>Add</button>
+      </form>
+      <p class="note">${state.meta?.lastRun ? `Last refresh ${esc(ago(state.meta.lastRun))}${state.meta.added != null ? `, ${state.meta.added} new videos` : ""}.` : "Not refreshed yet."} Ask Claude to refresh your FilterTube feed to fetch new videos from these sources.</p>
+    </section>
+    <section class="panel">
+      <h2>Following</h2>
+      ${state.sources.length ? `<ul class="list">${state.sources.map((s) => {
+        const [lab, cls] = st[s.status] || st.pending;
+        return `<li><span class="pill">${esc(s.type)}</span><span class="grow">${esc(s.label || s.value)}${s.note ? `<br><span class="note">${esc(s.note)}</span>` : ""}</span><span class="pill ${cls}">${lab}</span><button class="act" data-delsrc="${esc(s.id)}" aria-label="Remove ${esc(s.label || s.value)}">Remove</button></li>`;
+      }).join("")}</ul>` : '<p class="note">Nothing yet. Add a few channels you trust and a couple of topics.</p>'}
+    </section>
+  </div>`;
+}
+
+function hiddenView(c) {
+  return `<div class="col">
+    <div><h1>Hidden by your rules</h1><p class="lede">Everything your rules kept out of the feed, and why. If a rule caught something it shouldn’t have, show that video anyway or adjust the rule.</p></div>
+    ${c.hidden.length ? `<section class="panel"><ul class="list">${c.hidden.map(({ v, ev }) => `<li>
+      <span class="mini">${thumbHtml(v)}</span>
+      <span class="grow"><strong>${esc(v.title)}</strong><br><span class="note">${esc(v.channel)}${v.durationSec ? " · " + fmtDur(v.durationSec) : ""}</span><br>${ev.reasons.map((r) => `<span class="pill ${r.kind === "allow" ? "allow" : "block"}">${esc(r.text)}</span>`).join(" ")}</span>
+      ${ev.reasons.some((r) => r.kind === "user") ? `<button class="act" data-undo="${esc(v.id)}">Undo</button>` : `<button class="act" data-override="${esc(v.id)}">Show anyway</button>`}
+    </li>`).join("")}</ul></section>` : '<div class="empty"><h2>Nothing hidden</h2><p class="lede">Every video in your feed passes your rules.</p></div>'}
+  </div>`;
+}
+
+/* ---------- interactions ---------- */
+let saveTimer = null;
+function savePrefs() {
+  lsSet("ft.prefs", state.prefs);
+  if (!prefsRef) return;
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(async () => {
+    try { await prefsRef.set(JSON.parse(JSON.stringify(state.prefs))); }
+    catch (e) { if (e?.code === "invalid_argument") prefsRef = null; }
+  }, 600);
+}
+function bumpChannel(v, d) { if (!v) return; state.prefs.channels[v.channelId] = (state.prefs.channels[v.channelId] || 0) + d; }
+function trimWatched() {
+  const w = Object.entries(state.prefs.watched);
+  if (w.length > 400) state.prefs.watched = Object.fromEntries(w.sort((a, b) => b[1] - a[1]).slice(0, 300));
+}
+
+function bindView() {
+  const m = $("#main");
+  m.onclick = (e) => {
+    const t = e.target.closest("[data-watch],[data-like],[data-nope],[data-override],[data-undo],[data-delsrc],[data-mode],#compileBtn,#stopCompile,#followQ");
+    if (!t) return;
+    const p = state.prefs;
+    if (t.dataset.watch) { const id = t.dataset.watch; if (!p.watched[id]) bumpChannel(state.videos.get(id), 0.5); p.watched[id] = Date.now(); trimWatched(); savePrefs(); setTimeout(render, 50); return; }
+    if (t.dataset.like) { const id = t.dataset.like, v = state.videos.get(id); if (p.liked[id]) { delete p.liked[id]; bumpChannel(v, -1.5); } else { p.liked[id] = true; bumpChannel(v, 1.5); } savePrefs(); render(); return; }
+    if (t.dataset.nope) { const id = t.dataset.nope; p.notInterested[id] = true; bumpChannel(state.videos.get(id), -2); savePrefs(); render(); return; }
+    if (t.dataset.override) { p.override[t.dataset.override] = true; savePrefs(); render(); return; }
+    if (t.dataset.undo) { const id = t.dataset.undo; delete p.notInterested[id]; bumpChannel(state.videos.get(id), 2); savePrefs(); render(); return; }
+    if (t.dataset.mode) { p.mode = t.dataset.mode; savePrefs(); render(); return; }
+    if (t.dataset.delsrc) { removeSource(t.dataset.delsrc); return; }
+    if (t.id === "compileBtn") { compileRules(); return; }
+    if (t.id === "stopCompile") { compileCtl?.abort(); return; }
+    if (t.id === "followQ") { addSource("topic", state.q.trim()).then(() => { location.hash = "#sources"; }); return; }
+  };
+  const ta = $("#rulesText");
+  if (ta) ta.oninput = () => { state.prefs.rulesText = ta.value; lsSet("ft.prefs", state.prefs); };
+  const f = $("#addForm");
+  if (f) {
+    const type = $("#srcType"), val = $("#srcValue");
+    const ph = { channel: "@handle or channel link", topic: "e.g. woodworking, rust programming", trending: "Country code, e.g. US, IN, GB" };
+    type.onchange = () => { val.placeholder = ph[type.value]; };
+    f.onsubmit = (e) => { e.preventDefault(); const v = val.value.trim(); if (!v) return; addSource(type.value, v).then(() => { val.value = ""; }); };
+  }
+}
+
+async function addSource(type, value) {
+  if (!db) return;
+  let v = value;
+  if (type === "channel") { const m = v.match(/youtube\.com\/(?:channel\/(UC[\w-]{20,})|(@[\w.-]+)|c\/([\w.-]+)|user\/([\w.-]+))/i); if (m) v = m[1] || m[2] || m[3] || m[4]; if (!v.startsWith("@") && !v.startsWith("UC")) v = "@" + v; }
+  if (type === "trending") v = v.toUpperCase().slice(0, 2);
+  const id = (type + "-" + critKey(v)).slice(0, 120);
+  try { await db.collection("sources").doc(id).set({ type, value: v, label: v, status: "pending", addedAt: new Date().toISOString() }); }
+  catch (e) { const n = $("#main .note"); if (n) { n.textContent = "Couldn’t add that source: " + (e?.code === "invalid_argument" ? "you can view this feed but not change its sources." : "try again in a moment."); n.classList.add("err"); } }
+}
+async function removeSource(id) { try { await db.collection("sources").doc(id).delete(); } catch {} }
+
+/* ---------- Claude: compile rules ---------- */
+let compileCtl = null;
+async function compileRules() {
+  if (!sample) return;
+  const text = state.prefs.rulesText.trim();
+  state.compile = { running: true, error: "" }; render();
+  compileCtl = new AbortController();
+  const prompt = `You convert a person's plain-English rules for their YouTube feed into structured filters.
+
+Reply with only JSON of this shape:
+{"rules":[{"action":"block|allow_only|boost|demote","text":"short plain restatement","when":{...},"schedule":{...}}],"notes":"anything you could not express, else empty"}
+
+"when" fields (all optional, ALL present fields must hold for the rule to match):
+- "is_short": true|false  (YouTube Shorts)
+- "is_live": true|false
+- "min_minutes" / "max_minutes": number (video length)
+- "max_age_days" / "min_age_days": number (upload age)
+- "channels": [channel names]  (substring match on channel name)
+- "keywords": [words]  (substring match on title, tags, description)
+- "about": [short topic or quality descriptions]  (judged by an AI from title/channel/description; matches if ANY applies). Use this for themes ("politics", "video games"), styles ("reaction video", "prank"), and qualities ("clickbait title", "rage bait").
+"schedule" (optional, rule only applies then): {"days":["mon","tue",...], "from":"HH:MM", "to":"HH:MM"} 24h local time.
+
+Actions: "block" hides matches. "allow_only" means only matching videos may show (several allow_only rules combine with OR). "boost"/"demote" change ranking.
+Keep "about" descriptions short and specific. One rule per idea. Ignore anything that is not about which videos to show.
+
+Example: "No shorts. Only coding or maths videos on weekdays 9 to 5. Less gaming." ->
+{"rules":[{"action":"block","text":"Hide Shorts","when":{"is_short":true}},{"action":"allow_only","text":"Only coding or maths videos during work hours","when":{"about":["programming","mathematics"]},"schedule":{"days":["mon","tue","wed","thu","fri"],"from":"09:00","to":"17:00"}},{"action":"demote","text":"Rank gaming lower","when":{"about":["video games"]}}],"notes":""}
+
+The person's rules:
+"""
+${text.slice(0, 4000)}
+"""`;
+  try {
+    const raw = await sample.json(prompt, { signal: compileCtl.signal });
+    const compiled = sanitizeCompiled(raw);
+    if (!compiled.rules.length && text) throw { code: "nothing" };
+    state.prefs.compiled = compiled; state.prefs.override = {};
+    state.classify.paused = false; state.classify.budget = 30; state.classify.error = "";
+    state.compile = { running: false, error: "" };
+    savePrefs();
+  } catch (e) {
+    const msg = { cancelled: "", not_granted: "Claude wasn’t allowed for this page, so your previous rules are still in use.", rate_limited: "Claude is busy or you’ve hit a usage limit. Try again in a minute.", invalid_json: "Claude’s answer couldn’t be read. Try again, or simplify a rule.", nothing: "Claude didn’t find any rule about which videos to show. Try wording it as “Hide …” or “Only …”.", refused: "Claude declined these rules. Try rewording them." }[e?.code];
+    state.compile = { running: false, error: msg ?? "Something went wrong reaching Claude. Try again." };
+  }
+  render();
+}
+
+/* ---------- Claude: classify "about" conditions ---------- */
+let pumpBusy = false, lastNeed = new Map();
+function queueClassify(c) { lastNeed = c.need; if (c.need.size && !pumpBusy && !state.classify.paused && sample && !state.classify.error) setTimeout(pump, 400); }
+async function pump() {
+  if (pumpBusy || !sample) return;
+  pumpBusy = true; state.classify.running = true;
+  try {
+    while (lastNeed.size && state.classify.budget > 0 && !state.classify.paused) {
+      // group: take up to 20 videos and the union of their unanswered criteria
+      const ids = [...lastNeed.keys()].filter((id) => state.videos.has(id)).slice(0, 20);
+      if (!ids.length) break;
+      const crit = [...new Set(ids.flatMap((id) => [...lastNeed.get(id)]))].slice(0, 15);
+      state.classify.budget--; renderStrip(compute());
+      const list = ids.map((id) => { const v = state.videos.get(id); return { id, title: v.title, channel: v.channel, category: v.category || "", tags: (v.tags || []).slice(0, 8), description: (v.description || "").slice(0, 300) }; });
+      const prompt = `For each YouTube video below, decide which of these criteria apply, judging only from the given title, channel, category, tags and description.
+
+Criteria:
+${crit.map((c, i) => `c${i + 1}: ${c}`).join("\n")}
+
+Videos (JSON):
+${JSON.stringify(list)}
+
+Reply with only a JSON object mapping each video id to an array of the criterion codes that apply, e.g. {"abc123":["c2"],"xyz789":[]}. Include every video id.`;
+      const out = await sample.json(prompt, { modelTier: "quick", cache: { gcTime: 864e5 } });
+      for (const id of ids) {
+        const hits = new Set(Array.isArray(out?.[id]) ? out[id].map(String) : []);
+        const lab = { ...(state.labels.get(id) || {}) };
+        crit.forEach((c, i) => { if (lastNeed.get(id)?.has(c)) lab[critKey(c)] = hits.has("c" + (i + 1)); });
+        state.labels.set(id, lab);
+        if (db) { try { await db.collection("labels").doc(id).set(lab); } catch {} }
+      }
+      const c = compute(); lastNeed = c.need; render();
+    }
+    if (state.classify.budget <= 0 && lastNeed.size) state.classify.paused = true;
+  } catch (e) {
+    state.classify.error = { not_granted: "Topic checks are off because Claude wasn’t allowed for this page.", rate_limited: "Topic checks paused: Claude is busy or a usage limit was reached.", sampling_disabled: "Claude isn’t available for this account, so topic rules can’t be checked." }[e?.code] || "";
+    if (!state.classify.error) state.classify.paused = true;
+  } finally {
+    pumpBusy = false; state.classify.running = false; render();
+  }
+}
+
+/* ---------- boot ---------- */
+function route() { const h = location.hash.slice(1); state.view = ["feed", "rules", "sources", "hidden"].includes(h) ? h : "feed"; render(); }
+window.addEventListener("hashchange", route);
+$("#searchForm").onsubmit = (e) => { e.preventDefault(); };
+$("#q").oninput = (e) => { state.q = e.target.value; if (state.view !== "feed") location.hash = "#feed"; else render(); };
+
+(function loadLocal() {
+  const p = lsGet("ft.prefs");
+  if (p && typeof p === "object") Object.assign(state.prefs, p, { compiled: sanitizeCompiled(p.compiled || DEFAULT_COMPILED) });
+})();
+route();
+
+(async function connect() {
+  const c = window.claude;
+  if (!c?.use) { state.dbState = "none"; render(); return; }
+  const [d, s, u] = await Promise.all([c.use("db"), c.use("sample"), c.use("user")]);
+  db = d; sample = s;
+  if (!db) { state.dbState = "none"; render(); return; }
+  const timer = setTimeout(() => { if (state.dbState === "connecting") { state.dbState = "offline"; render(); } }, 10000);
+  db.collection("videos").orderBy("publishedAt", "desc").limit(600).onSnapshot((snap) => {
+    state.videos = new Map(snap.docs.map((d) => [d.id, { id: d.id, ...d.data() }]));
+    if (!snap.metadata.fromCache) { clearTimeout(timer); state.dbState = "live"; }
+    render();
+  }, () => { clearTimeout(timer); state.dbState = "offline"; render(); });
+  db.collection("labels").limit(1000).onSnapshot((snap) => {
+    for (const d of snap.docs) state.labels.set(d.id, { ...(state.labels.get(d.id) || {}), ...d.data() });
+    render();
+  }, () => {});
+  db.collection("sources").onSnapshot((snap) => { state.sources = snap.docs.map((d) => ({ id: d.id, ...d.data() })); render(); }, () => {});
+  db.doc("meta/ingest").onSnapshot((snap) => { state.meta = snap.exists ? snap.data() : null; render(); }, () => {});
+  uid = u ? await u.id() : null;
+  if (uid) {
+    prefsRef = db.doc("data/users/" + uid + "/prefs");
+    try {
+      const snap = await prefsRef.get();
+      if (snap.exists) { const p = snap.data(); Object.assign(state.prefs, p, { compiled: sanitizeCompiled(p.compiled || DEFAULT_COMPILED) }); lsSet("ft.prefs", state.prefs); }
+    } catch {}
+  }
+  state.prefsLoaded = true; render();
+})();
+</script>
