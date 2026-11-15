@@ -1,6 +1,7 @@
 import { DEFAULT_TEXT, DEFAULT_COMPILED, sanitizeCompiled, ruleActive, evaluate, score, similarity, critKey } from "./rules.js";
 import { createYouTube } from "./youtube.js";
 import { createClaude, MODELS } from "./claude.js";
+import { createGemini } from "./gemini.js";
 
 /* ---------------- storage (this browser only) ---------------- */
 const load = (k, d) => { try { const v = JSON.parse(localStorage.getItem(k)); return v ?? d; } catch { return d; } };
@@ -14,7 +15,7 @@ const EXAMPLE_SOURCES = [
 
 const state = {
   route: { view: "feed" },
-  settings: { ytKey: "", claudeKey: "", model: "claude-opus-5-5", refreshHours: 3, ...load("ft.settings", {}) },
+  settings: { ytKey: "", claudeKey: "", model: "claude-opus-5-5", refreshHours: 3, topicCheck: "gemini", geminiModel: "", ...load("ft.settings", {}) },
   prefs: { rulesText: DEFAULT_TEXT, compiled: DEFAULT_COMPILED, mode: "strict", channels: {}, watched: {}, liked: {}, notInterested: {}, override: {}, ...load("ft.prefs", {}) },
   sources: load("ft.sources", EXAMPLE_SOURCES),
   pool: load("ft.pool", { videos: {}, lastRefresh: null }), // feed videos by id
@@ -24,9 +25,11 @@ const state = {
   search: { q: "", ids: [], next: null, loading: false, error: "", total: null, showHidden: false },
   refresh: { running: false, error: "" },
   compile: { running: false, error: "" },
-  classify: { running: false, error: "", paused: false, budget: 40 },
+  classify: { running: false, error: "", waitUntil: 0 },
 };
 state.prefs.compiled = sanitizeCompiled(state.prefs.compiled);
+// Rules saved before topics had example phrases: fill in the starter examples where they exist.
+for (const [t, ex] of Object.entries(state.prefs.compiled.topics)) if (!ex.length && DEFAULT_COMPILED.topics[t]) state.prefs.compiled.topics[t] = DEFAULT_COMPILED.topics[t];
 for (const v of Object.values(state.pool.videos)) state.known.set(v.id, v);
 
 const savePrefs = () => save("ft.prefs", state.prefs);
@@ -48,9 +51,10 @@ function addUnits(n) {
   save("ft.units", state.units);
 }
 
-let yt = null, claude = null;
+let yt = null, claude = null, gemini = null;
 function connectClients() {
   yt = state.settings.ytKey ? createYouTube(state.settings.ytKey, addUnits) : null;
+  gemini = state.settings.ytKey && state.settings.topicCheck === "gemini" ? createGemini(state.settings.ytKey, state.settings.geminiModel) : null;
   claude = state.settings.claudeKey ? createClaude({ apiKey: state.settings.claudeKey, model: state.settings.model }) : null;
 }
 connectClients();
@@ -77,7 +81,8 @@ function ago(iso) {
     if (d >= s) { const k = Math.floor(d / s); return `${k} ${n}${k > 1 ? "s" : ""} ago`; }
   return "just now";
 }
-const ev = (v) => evaluate(v, state.prefs, state.labels[v.id]);
+const NO_TOPICS = new Proxy({}, { get: () => false }); // topic checks off: topic rules never match
+const ev = (v) => evaluate(v, state.prefs, state.settings.topicCheck === "off" ? NO_TOPICS : state.labels[v.id]);
 const watchHref = (id) => "#watch=" + encodeURIComponent(id);
 function bumpChannel(v, d) { if (v) state.prefs.channels[v.channelId] = (state.prefs.channels[v.channelId] || 0) + d; }
 
@@ -171,7 +176,7 @@ async function compileRules() {
     state.prefs.compiled = compiled;
     state.prefs.override = {};
     savePrefs();
-    Object.assign(state.classify, { paused: false, budget: 40, error: "" });
+    state.classify.error = "";
   } catch (e) { state.compile.error = e.message; }
   state.compile.running = false;
   render();
@@ -191,22 +196,22 @@ function needed() {
   return need;
 }
 let pumpTimer = null;
-function schedulePump() { if (!pumpTimer) pumpTimer = setTimeout(() => { pumpTimer = null; pump(); }, 300); }
+function schedulePump(delay = 200) { if (!pumpTimer) pumpTimer = setTimeout(() => { pumpTimer = null; pump(); }, delay); }
 async function pump() {
   const k = state.classify;
-  if (!claude || k.running || k.paused || k.error) return;
+  if (!gemini || k.running || k.error) return;
+  if (Date.now() < k.waitUntil) return schedulePump(k.waitUntil - Date.now());
   let need = needed();
   if (!need.size) return;
   k.running = true; renderStrip();
   try {
-    while (need.size && k.budget > 0 && !k.paused) {
-      // Search results and the open video first, then the feed.
+    while (need.size) {
+      // The open video and search results first, then the feed.
       const prio = [state.route.view === "watch" ? state.route.id : null, ...state.search.ids].filter((id) => need.has(id));
-      const ids = [...new Set([...prio, ...need.keys()])].slice(0, 20);
+      const ids = [...new Set([...prio, ...need.keys()])].slice(0, 25);
       const crit = [...new Set(ids.flatMap((id) => [...need.get(id)]))].slice(0, 15);
-      k.budget--;
       const list = ids.map((id) => { const v = state.known.get(id); return { id, title: v.title, channel: v.channel, category: v.category, tags: (v.tags || []).slice(0, 8), description: (v.description || "").slice(0, 300) }; });
-      const res = await claude.classify(list, crit);
+      const res = await gemini.classify(list, crit);
       for (const id of ids) {
         const hits = res[id] || new Set();
         const lab = (state.labels[id] ||= {});
@@ -216,12 +221,12 @@ async function pump() {
       render();
       need = needed();
     }
-    if (k.budget <= 0 && need.size) k.paused = true;
   } catch (e) {
-    k.error = e.message;
+    if (e.code === "rate") { k.waitUntil = Date.now() + 60e3; schedulePump(60e3); }
+    else k.error = e.message;
   } finally {
     k.running = false;
-    render();
+    renderStrip();
   }
 }
 
@@ -273,10 +278,10 @@ function renderStrip() {
   else if (state.refresh.error) parts.push(`<span class="chip"><span class="dot err"></span>${esc(state.refresh.error)}</span>`);
   else if (state.pool.lastRefresh) parts.push(`<span class="chip"><span class="dot on"></span>Feed refreshed ${esc(ago(state.pool.lastRefresh))} <button class="linkbtn" data-refresh>Refresh</button></span>`);
   const k = state.classify, need = needed().size;
-  if (!state.settings.claudeKey) { if (need) parts.push(`<span class="chip"><span class="dot"></span>${need} videos wait for topic checks. <a href="#settings">Add a Claude key</a></span>`); }
-  else if (k.error) parts.push(`<span class="chip"><span class="dot err"></span>Topic checks stopped: ${esc(k.error)} <button class="linkbtn" data-resume>Retry</button></span>`);
-  else if (k.running) parts.push(`<span class="chip"><span class="dot busy"></span>Claude is checking ${need} videos against your rules</span>`);
-  else if (k.paused && need) parts.push(`<span class="chip"><span class="dot"></span>${need} videos not checked yet <button class="linkbtn" data-resume>Check them</button></span>`);
+  if (k.error) parts.push(`<span class="chip"><span class="dot err"></span>${esc(k.error)} <button class="linkbtn" data-resume>Retry</button></span>`);
+  else if (k.running) parts.push(`<span class="chip"><span class="dot busy"></span>Gemini is checking ${need} videos against your topic rules</span>`);
+  else if (need && Date.now() < k.waitUntil) parts.push(`<span class="chip"><span class="dot"></span>Gemini’s free rate limit was reached; ${need} videos will be checked in a minute</span>`);
+  else if (need && !gemini && state.settings.ytKey) parts.push(`<span class="chip"><span class="dot"></span>${need} videos wait for topic checks, which are turned off in <a href="#settings">Settings</a></span>`);
   if (state.units.day === ptDay() && state.units.used) parts.push(`<span title="Free daily YouTube quota is 10,000 units">YouTube quota used today: ${state.units.used.toLocaleString()} / 10,000</span>`);
   $("#strip").innerHTML = parts.join("");
 }
@@ -349,7 +354,7 @@ function renderWatch(m) {
     } else if (gateKey === "blocked") {
       stage = `<div class="gate"><div><h2>Your rules hide this video</h2><p class="lede">${e.reasons.map((r) => esc(r.text)).join(" · ")}</p><button class="btn ghost" data-override="${esc(id)}">Watch anyway</button></div></div>`;
     } else if (gateKey === "waiting") {
-      stage = `<div class="gate"><div><h2>Checking this video against your rules…</h2><p class="lede">${claude ? "Claude is looking at it now." : "Add a Claude key in Settings to check topic rules, or switch to “Show until checked” on the Rules page."}</p></div></div>`;
+      stage = `<div class="gate"><div><h2>Checking this video against your rules…</h2></div></div>`;
     } else stage = `<div class="gate"><div><h2>${yt ? "Loading video…" : "Add your YouTube API key in Settings to watch videos here."}</h2></div></div>`;
     m.innerHTML = `<div class="watch"><div style="min-width:0">${stage}<div id="winfo"></div></div><aside class="upnext" id="upnext" aria-label="Up next"></aside></div>`;
   }
@@ -367,7 +372,7 @@ function setupCard() {
   return `<div class="col"><div><h1>Set up FilterTube</h1><p class="lede">FilterTube shows YouTube through rules you write in plain English. It runs entirely in your browser with your own keys.</p></div>
     <section class="panel"><ol class="steps">
       <li><a href="#settings">Add a YouTube Data API key</a> to load videos, search and play them here.</li>
-      <li>Optionally <a href="#settings">add a Claude API key</a> so topic rules like “no politics” or “no clickbait” work.</li>
+      <li>The same Google key also runs topic checks (“no politics”, “no clickbait”) with Gemini, once you enable the Gemini API for it. Optionally <a href="#settings">add a Claude API key</a> to write your own rules in plain English.</li>
       <li>Pick channels and topics under <a href="#sources">Sources</a> and write your <a href="#rules">Rules</a>.</li>
     </ol><div><a class="btn" href="#settings">Open Settings</a></div></section></div>`;
 }
@@ -394,7 +399,7 @@ function rulesView() {
   const p = state.prefs, cs = state.compile;
   const label = { block: ["Hide", "block"], allow_only: ["Only", "allow"], boost: ["Boost", "boost"], demote: ["Lower", ""] };
   return `<div class="col">
-    <div><h1>Your rules</h1><p class="lede">Write what you want YouTube to be, in your own words, one idea per line. Claude turns it into filters that run on every video in your feed, your searches and Up next.</p></div>
+    <div><h1>Your rules</h1><p class="lede">Write what you want YouTube to be, in your own words, one idea per line. Claude turns it into filters once; they then apply to every video in your feed, your searches and Up next.</p></div>
     <section class="panel">
       <label for="rulesText"><h2>In your words</h2></label>
       <textarea id="rulesText" spellcheck="true">${esc(p.rulesText)}</textarea>
@@ -414,7 +419,7 @@ function rulesView() {
         return `<li class="rule ${on ? "" : "off"}"><span class="pill ${cls}">${lab}</span><span class="txt">${esc(r.text)}${r.schedule ? ` <span class="note">(${esc(describeSchedule(r.schedule))}${on ? "" : ", not active now"})</span>` : ""}</span><span class="cond">${esc(describeWhen(r.when))}</span></li>`;
       }).join("")}</ul>` : '<p class="note">No rules yet: every video is shown.</p>'}
       ${p.compiled.notes ? `<p class="note">Claude’s note: ${esc(p.compiled.notes)}</p>` : ""}
-      <p class="note">Conditions marked <code>about:</code> are checked by Claude from each video’s title, channel and description, once per video. The rest are checked instantly.</p>
+      <p class="note">Conditions marked <code>about:</code> are checked by Gemini from each video’s title, channel, tags and description, about 25 videos per request, once per video. The other conditions are checked instantly.</p>
     </section></div>`;
 }
 
@@ -461,9 +466,15 @@ function settingsView() {
       <div class="field"><label for="ytKey">YouTube Data API key</label><input id="ytKey" type="password" autocomplete="off" value="${esc(s.ytKey)}" placeholder="AIza…">
         <p class="note">Create one in Google Cloud Console → APIs &amp; Services → Credentials, with “YouTube Data API v3” enabled. Restrict it to that API, and under Application restrictions choose <em>Websites</em> and add <code>${esc(location.origin)}/*</code> so it only works on this site.</p></div>
       <div class="field"><label for="claudeKey">Claude API key <span class="note">(for topic rules)</span></label><input id="claudeKey" type="password" autocomplete="off" value="${esc(s.claudeKey)}" placeholder="sk-ant-…">
-        <p class="note">From console.anthropic.com → API keys. Without it, Shorts, length, channel and keyword rules still work; topic rules wait.</p></div>
+        <p class="note">From console.anthropic.com → API keys. Needed only to turn newly written rules into filters. Without it, the current rules keep working.</p></div>
       <div class="field"><label for="model">Claude model</label><select id="model">${MODELS.map((m) => `<option value="${m.id}" ${m.id === s.model ? "selected" : ""}>${esc(m.label)}</option>`).join("")}</select>
-        <p class="note">Topic checks send about 20 videos per request. A cheaper model costs less per check.</p></div>
+        <p class="note">Used only when you click Apply rules. Videos are never sent to Claude.</p></div>
+      <div class="field"><label for="topicCheck">Topic checks</label><select id="topicCheck">
+        <option value="gemini" ${s.topicCheck === "gemini" ? "selected" : ""}>Gemini, using the YouTube key above</option>
+        <option value="off" ${s.topicCheck === "off" ? "selected" : ""}>Off (topic rules never match)</option></select>
+        <p class="note">In Google Cloud, enable the <a href="https://console.cloud.google.com/apis/library/generativelanguage.googleapis.com" target="_blank" rel="noopener">Generative Language API</a> in the same project as the YouTube API, and if you restricted the key to certain APIs, add it there too. The Gemini free tier is enough for personal use. ${gemini?.model ? `Using <code>${esc(gemini.model)}</code>.` : ""}</p></div>
+      <div class="field"><label for="geminiModel">Gemini model <span class="note">(optional)</span></label><input id="geminiModel" value="${esc(s.geminiModel)}" placeholder="Automatic: newest Flash-Lite model">
+        <p class="note">Leave blank to pick the newest Flash-Lite model automatically.</p></div>
       <div class="field"><label for="refreshHours">Refresh the feed every</label><select id="refreshHours">${[1, 3, 6, 12, 24].map((h) => `<option value="${h}" ${h === s.refreshHours ? "selected" : ""}>${h} hour${h > 1 ? "s" : ""}</option>`).join("")}</select></div>
       <div class="row"><button class="btn" type="submit">Save</button><span class="note" id="savedNote"></span></div>
     </form>
@@ -485,7 +496,7 @@ document.addEventListener("click", (e) => {
   else if (d.delsrc) { state.sources = state.sources.filter((s) => s.id !== d.delsrc); save("ft.sources", state.sources); }
   else if ("compile" in d) { compileRules(); return; }
   else if ("refresh" in d) { refreshFeed(); return; }
-  else if ("resume" in d) { Object.assign(state.classify, { paused: false, budget: 40, error: "" }); }
+  else if ("resume" in d) { state.classify.error = ""; }
   else if ("more" in d) { runSearch(state.search.q, true); return; }
   else if ("toggleHidden" in d) { state.search.showHidden = !state.search.showHidden; }
   else if ("clear" in d) { state.pool = { videos: {}, lastRefresh: null }; state.labels = {}; save("ft.pool", state.pool); save("ft.labels", {}); }
@@ -516,10 +527,10 @@ document.addEventListener("submit", (e) => {
   } else if (e.target.id === "settingsForm") {
     e.preventDefault();
     const before = state.settings.ytKey;
-    Object.assign(state.settings, { ytKey: $("#ytKey").value.trim(), claudeKey: $("#claudeKey").value.trim(), model: $("#model").value, refreshHours: +$("#refreshHours").value });
+    Object.assign(state.settings, { ytKey: $("#ytKey").value.trim(), claudeKey: $("#claudeKey").value.trim(), model: $("#model").value, refreshHours: +$("#refreshHours").value, topicCheck: $("#topicCheck").value, geminiModel: $("#geminiModel").value.trim() });
     save("ft.settings", state.settings);
     connectClients();
-    Object.assign(state.classify, { paused: false, budget: 40, error: "" });
+    state.classify.error = "";
     document.activeElement?.blur();
     render();
     const n = $("#savedNote"); if (n) { n.textContent = "Saved."; n.className = "note ok"; }

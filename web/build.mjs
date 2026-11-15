@@ -4,7 +4,11 @@ import fs from "node:fs";
 
 fs.mkdirSync("dist", { recursive: true });
 fs.copyFileSync("index.html", "dist/index.html");
-const opts = { entryPoints: ["src/main.js"], bundle: true, format: "esm", target: "es2020", minify: true, sourcemap: false, outfile: "dist/app.js" };
+
+const opts = {
+  entryPoints: { app: "src/main.js" },
+  bundle: true, format: "esm", target: "es2022", minify: true, sourcemap: false, outdir: "dist",
+};
 if (process.argv.includes("--serve")) {
   const ctx = await esbuild.context(opts);
   await ctx.watch();

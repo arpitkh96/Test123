@@ -52,23 +52,6 @@ const COMPILE_SCHEMA = {
   },
 };
 
-const CLASSIFY_SCHEMA = {
-  type: "object",
-  additionalProperties: false,
-  required: ["results"],
-  properties: {
-    results: {
-      type: "array",
-      items: {
-        type: "object",
-        additionalProperties: false,
-        required: ["id", "matches"],
-        properties: { id: { type: "string" }, matches: { type: "array", items: { type: "string" } } },
-      },
-    },
-  },
-};
-
 const COMPILE_PROMPT = `You convert a person's plain-English rules for their YouTube feed into structured filters.
 
 "when" fields (all optional; ALL present fields must hold for the rule to match):
@@ -118,24 +101,6 @@ export function createClaude({ apiKey, model }) {
   return {
     compileRules(text) {
       return askJSON(`${COMPILE_PROMPT}\n\nThe person's rules:\n"""\n${text.slice(0, 4000)}\n"""`, COMPILE_SCHEMA, "medium", 16000);
-    },
-    /** videos: [{id,title,channel,category,tags,description}], criteria: [string] -> { [id]: Set<criterion> } */
-    async classify(videos, criteria) {
-      const prompt = `For each YouTube video below, decide which of these criteria apply, judging only from its title, channel, category, tags and description.
-
-Criteria:
-${criteria.map((c, i) => `c${i + 1}: ${c}`).join("\n")}
-
-Videos (JSON):
-${JSON.stringify(videos)}
-
-Return one result per video id, listing the codes (like "c2") of the criteria that apply; an empty list if none do.`;
-      const out = await askJSON(prompt, CLASSIFY_SCHEMA, "low", 16000);
-      const map = {};
-      for (const r of out.results || []) {
-        map[String(r.id)] = new Set((r.matches || []).map((code) => criteria[parseInt(String(code).replace(/\D/g, ""), 10) - 1]).filter(Boolean));
-      }
-      return map;
     },
   };
 }

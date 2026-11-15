@@ -19,6 +19,14 @@ export const DEFAULT_COMPILED = {
     { id: "r4", action: "block", text: "Hide videos longer than 2 hours", when: { min_minutes: 120 } },
     { id: "r5", action: "boost", text: "Rank programming and science higher", when: { about: ["programming or software engineering", "science"] } },
   ],
+  // Example phrases per topic, used by the in-browser model to recognise it.
+  topics: {
+    "celebrity gossip or influencer drama": ["celebrity gossip and breakups", "influencer drama and feuds", "youtuber beef exposed", "what really happened between the stars", "celebrity scandal and rumors"],
+    "reaction video": ["reacting to videos", "my reaction to the worst fails", "watching and reacting to funny clips", "reaction to a music video or trailer"],
+    "clickbait title (exaggerated, misleading or withholding to bait clicks)": ["you won't believe what happened next", "this one trick changed everything", "SHOCKING!!! gone wrong", "I tried this crazy viral challenge", "the truth they don't want you to know"],
+    "programming or software engineering": ["programming tutorial", "software engineering and coding", "writing code in Rust, Python or JavaScript", "how git, compilers or web servers work", "building an app from scratch"],
+    "science": ["science explained", "physics and astronomy", "how the universe works", "biology and chemistry experiments", "space telescopes and planets"],
+  },
   notes: "",
 };
 
@@ -26,7 +34,10 @@ export const critKey = (s) =>
   String(s).toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "").slice(0, 80) || "x";
 
 export function sanitizeCompiled(raw) {
-  const out = { rules: [], notes: typeof raw?.notes === "string" ? raw.notes : "" };
+  const out = { rules: [], topics: {}, notes: typeof raw?.notes === "string" ? raw.notes : "" };
+  // topics may arrive as an object { name: [phrases] } or an array [{ name, examples }]
+  const tlist = Array.isArray(raw?.topics) ? raw.topics.map((t) => [t?.name, t?.examples]) : Object.entries(raw?.topics || {});
+  for (const [name, ex] of tlist) if (name && Array.isArray(ex)) out.topics[String(name).trim()] = ex.map(String).map((x) => x.trim()).filter(Boolean).slice(0, 10);
   const list = Array.isArray(raw?.rules) ? raw.rules : [];
   list.forEach((r, i) => {
     if (!r || typeof r !== "object") return;
@@ -55,6 +66,8 @@ export function sanitizeCompiled(raw) {
     if (!Object.keys(when).length) return;
     out.rules.push({ id: "r" + (i + 1), action, text: String(r.text || "").slice(0, 200) || action, when, schedule });
   });
+  // every topic a rule uses gets an entry (the topic text alone still works as one phrase)
+  for (const r of out.rules) for (const a of r.when.about || []) if (!out.topics[a]) out.topics[a] = [];
   return out;
 }
 
@@ -69,8 +82,8 @@ export function ruleActive(r, now = new Date()) {
   return true;
 }
 
-/** true / false / null (an `about` condition still needs Claude). */
-export function matchWhen(w, v, lab) {
+/** true / false / null (an `about` condition hasn't been scored yet). lab: { critKey: score }. */
+export function matchWhen(w, v, lab, threshold = 0.34) {
   const mins = (v.durationSec || 0) / 60;
   const ageDays = (Date.now() - Date.parse(v.publishedAt)) / 864e5;
   if ("is_short" in w && !!v.isShort !== w.is_short) return false;
@@ -91,14 +104,14 @@ export function matchWhen(w, v, lab) {
   let unknown = false;
   for (const a of w.about) {
     const x = lab?.[critKey(a)];
-    if (x === true) return true;
+    if (x === true || (typeof x === "number" && x >= threshold)) return true;
     if (x === undefined) unknown = true;
   }
   return unknown ? null : false;
 }
 
-/** prefs: { compiled, mode, notInterested, override } */
-export function evaluate(v, prefs, lab) {
+/** prefs: { compiled, mode, notInterested, override }; threshold: topic match cut-off. */
+export function evaluate(v, prefs, lab, threshold) {
   const rules = (prefs.compiled?.rules || []).filter((r) => ruleActive(r));
   const res = { status: "show", reasons: [], boosts: [], need: new Set() };
   if (prefs.notInterested?.[v.id]) {
@@ -108,7 +121,7 @@ export function evaluate(v, prefs, lab) {
   }
   let allowRules = 0, allowHit = false, allowUnknown = false;
   for (const r of rules) {
-    const m = matchWhen(r.when, v, lab);
+    const m = matchWhen(r.when, v, lab, threshold);
     if (m === null) (r.when.about || []).forEach((a) => { if (lab?.[critKey(a)] === undefined) res.need.add(a); });
     if (r.action === "block") {
       if (m === true) { res.status = "hide"; res.reasons.push({ text: r.text, kind: "block" }); }
