@@ -1,141 +1,98 @@
-# FilterTube — design notes (think first, build later)
+# FilterTube: design
 
-Goal: a YouTube experience where the user writes rules in plain English
-("no Shorts", "hide anything about celebrity gossip", "only coding videos on weekdays")
-and the app follows them, without losing good recommendations.
+Goal: YouTube without distractions, where the user decides what "distraction" means by writing rules in plain
+English ("No Shorts", "hide celebrity gossip and reaction videos", "only coding or maths on weekdays before 6pm"),
+and the site applies them to the feed, search results and "Up next".
 
----
+## 1. Key decisions (and why)
 
-## 1. Can we keep YouTube's own recommendation algorithm?
-
-**Not in a standalone clone.** The official YouTube Data API v3 does not give
-third-party apps the personalised feed:
-
-| What we'd want | Available through the official API? |
-|---|---|
-| Personalised home feed | No (the `activities` "home" feed was removed years ago) |
-| "Up next" / related videos | No (`search.list?relatedToVideoId` was removed in 2023) |
-| Watch history | No (removed in 2016) |
-| Subscriptions, liked videos, playlists | Yes (with OAuth) |
-| Channel uploads, trending, search | Yes (search is quota-expensive: 100 of 10,000 units/day) |
-
-YouTube's internal API (InnerTube, the one youtube.com itself calls) *does* return
-the personalised feed, but calling it from our own server with the user's cookies
-breaks the Terms of Service, breaks without warning, and means holding the user's
-Google session on our server. **Not recommended.**
-
-**It is possible if we filter YouTube instead of copying it.** A browser extension
-runs inside youtube.com while the user is signed in, so YouTube's real algorithm
-still chooses the videos. We remove what the rules reject before it is shown.
-YouTube's infinite scroll fills the gaps, so the feed stays full.
-
-## 2. Two ways to build it
-
-### Option A — Browser extension on top of youtube.com (recommended first)
-- Keeps 100% of YouTube's recommendations, search, playback, comments and login.
-- Filters at the **data layer**: we intercept the JSON YouTube loads
-  (`ytInitialData` and `/youtubei/v1/browse|next|search` responses) and remove
-  rejected items *before* they are drawn. This is sturdier than hiding page elements,
-  and avoids content flashing on screen and then disappearing. Hiding page elements
-  stays as a backup.
-- Also covers places a clone never could: the end-screen suggestions, the "Up next"
-  sidebar and the Shorts shelf.
-- Downside: desktop browsers only (plus Firefox/Kiwi on Android); it depends on
-  YouTube's page structure, which changes, so it needs upkeep.
-
-### Option B — Standalone clone (own website/app, official API + embedded player)
-Plays videos through the official IFrame embed, which the Terms allow. Because there
-is no YouTube algorithm, **we generate the feed ourselves**:
-
-1. **Candidates** (cheap API calls first):
-   - Recent uploads from the user's subscriptions (`playlistItems` on each channel's
-     uploads playlist costs 1 unit per call)
-   - Channels behind liked videos and playlists
-   - `videos.list?chart=mostPopular` per region and category
-   - A few `search.list` queries built from the user's interest profile
-     (expensive, so cache them and run them on a schedule)
-   - "More like this": search using a watched video's topic and keywords
-2. **Filter**: apply the rule engine (section 3) to remove anything rejected.
-3. **Rank**: build an interest profile as an embedding of the titles and descriptions
-   the user watched or liked inside our app (we log our own watch history). Score each
-   candidate by
-   `similarity to the profile + freshness + channel affinity − already seen`,
-   then mix in about 10% exploration so the feed doesn't narrow too far.
-4. **Learn**: "Not interested", likes and watch-time all update the profile.
-
-- Upside: works on any device, full control, no DOM hacks, and no distraction can
-  get through because nothing comes from YouTube's feed.
-- Downside: the recommendations will be noticeably weaker than YouTube's at first.
-  API quota limits how much we can fetch per user, so we need a server and caching.
-
-### Recommendation
-Build **Option A first**, since it answers "keep YouTube's algorithm" directly. Write the
-rule engine as a separate package so Option B can reuse it later, if a clone that works
-on every device is still wanted.
-
-## 3. Natural-language rule engine (shared by both options)
-
-Calling an LLM for every video on every page is too slow and too costly. So the rules
-are **compiled once** and **evaluated cheaply**.
-
-### 3.1 Compile: English → structured rules (one LLM call when a rule is saved)
-```
-"No shorts, and nothing about politics or celebrity drama.
- On weekdays before 6pm only show programming or math videos."
-```
-becomes
-```json
-[
-  {"id":"r1","action":"block","when":{"is_short":true}},
-  {"id":"r2","action":"block","when":{"topic_any":["politics","celebrity gossip/drama"]}},
-  {"id":"r3","action":"allow_only",
-   "schedule":{"days":["mon","tue","wed","thu","fri"],"before":"18:00"},
-   "when":{"topic_any":["programming","mathematics"]}}
-]
-```
-The user sees this structured version shown back in plain language ("I understood:
-…") so they can confirm or correct it. Compiling is a good fit for structured
-output or tool use with a capable model.
-
-### 3.2 Predicates: cheap ones first, then the semantic ones
-| Kind | Examples | How it is checked |
+| Question | Decision | Why |
 |---|---|---|
-| Structural | `is_short`, `is_live`, `is_premiere`, `is_ad`/sponsored shelf, `duration < 5m` | From the item's data (Shorts: `reelItemRenderer`, `/shorts/` URL, a vertical video ≤ 3 min) |
-| Metadata | channel in list, title keyword/regex, language, view count, upload age | Plain code |
-| Semantic | topic, "clickbait", "rage bait", "kids content", sentiment | A small, fast LLM classifies **in batches** (20–50 items per call) using title + channel + description; fall back to embedding similarity against topic descriptions |
+| Extension on youtube.com, or own site? | **Own website** (user's choice) | Works anywhere, full control. Cost: YouTube's own recommendation algorithm is unavailable. |
+| Can we keep YouTube's recommendations? | **No.** | The official Data API has no personalised home feed, no related videos (removed 2023), no watch history. Calling YouTube's internal API with user cookies breaks the ToS and is fragile. |
+| Where does the feed come from then? | User-chosen **sources**: channel uploads, topic searches (last 45 days), trending by region. | Cheap on API quota (channels ~2 units, topics 100, trending 1 of 10,000/day). |
+| How is it ranked? | Freshness (decays over ~10 days) + channel affinity (likes +1.5, watch +0.5, not interested -2) + source type + rule boosts/demotes - already watched. | Simple, explainable, learns from use. |
+| Playback | Embedded `youtube-nocookie.com` player, `rel=0`, fullscreen allowed. | Plays on the site; end screens only suggest the same channel. |
+| Search | Full YouTube search (`search.list`), results filtered by the rules, with "N hidden by your rules, see which". | User requirement. 100 quota units per page. |
+| Hosting | GitHub Pages (static). No server. | Free; everything runs in the browser. |
+| Keys | User pastes them into Settings; stored in that browser's localStorage only; nothing in the repo. | Public site must not expose keys. Recommend restricting the YouTube key to the YouTube API + the site's URL. |
+| Turning English into filters | **Gemini** (structured JSON output), once per "Apply rules". | Rare, needs real language understanding. Claude was used first, then removed at the user's request. |
+| Checking topics on each video ("is this politics?") | **On-device model by default**; Gemini optional; or off. | Runs for every video, so it should be free, private and fast. Plain code can't judge topics. |
 
-### 3.3 Evaluate fast
-- Run the structural and metadata checks first; most items are decided without an LLM.
-- Cache semantic labels by `videoId` (in storage that survives restarts; a shared
-  server cache in Option B). A video is classified once, ever.
-- Classify only the items close to being shown; prefetch the next page.
-- **Uncertain items:** hold the item back until it is classified (strict, the
-  default for "no distractions") or show it until it is classified (lenient).
-  The user chooses per rule.
+History: v1 was a claude.ai Artifact (`artifact/filtertube.html`) whose videos were loaded by a Node script
+(`tools/ingest.mjs`) run in a Claude session; it couldn't embed the player or call YouTube from the page, so it
+was replaced by the website. Then Claude (Anthropic API) was used for both rules and topic checks; then topic
+checks moved to Gemini with the YouTube key; then the Gemini key was separated (AI Studio keys are their own);
+then Claude was removed; then the on-device model was added for topic checks.
 
-### 3.4 Rule semantics
-- `block` > `allow_only` > `boost`/`demote` (ranking in Option B, reordering in A).
-- Schedules and scopes (home / search / sidebar / end-screen).
-- An explanation for every hidden item ("Hidden by rule r2: politics"), plus a
-  "show anyway" escape hatch and a log, so the user can tune the rules.
-- Options that aren't about individual videos: hide comments, hide the Shorts tab,
-  disable autoplay, hide view counts.
+## 2. Rules
 
-## 4. Proposed implementation plan (Option A)
-1. Chrome MV3 extension skeleton (TypeScript + Vite): content script, a page-world
-   script that intercepts fetch/XHR and `ytInitialData`, a service worker, and an
-   options page.
-2. Structural filters: Shorts everywhere (shelves, tab, `/shorts/` redirect to `/watch`),
-   plus live/premiere/duration/channel/keyword checks. **This works without any LLM.**
-3. Rule compiler: options page textarea → LLM → validated JSON (schema check) → shown
-   back in plain language for confirmation.
-4. Semantic classifier: batched calls, a `videoId` cache, the strict/lenient setting,
-   and explanations.
-5. A "Hidden items" panel with the reason and "show anyway".
-6. Later: Option B, reusing the `rules/` package.
+### 2.1 Compiled form (produced by Gemini from the user's text)
 
-### Open decisions
-- Extension (keeps the algorithm) vs standalone clone (works everywhere)?
-- LLM API key: the user's own key stored in the extension (simplest) vs a small
-  backend proxy (keeps the key server-side, allows a shared cache)?
-- Strict or lenient default for unclassified items?
+```json
+{
+  "rules": [
+    {"action": "block", "text": "Hide Shorts", "when": {"is_short": true}},
+    {"action": "allow_only", "text": "Only coding or maths during work hours",
+     "when": {"about": ["programming", "mathematics"]},
+     "schedule": {"days": ["mon","tue","wed","thu","fri"], "from": "09:00", "to": "17:00"}},
+    {"action": "demote", "text": "Rank gaming lower", "when": {"about": ["video games"]}}
+  ],
+  "topics": [{"name": "programming", "examples": ["rust tutorial: build a web server", "..."]}],
+  "notes": "anything that couldn't be expressed"
+}
+```
+
+- `when` fields, all of which must hold: `is_short`, `is_live`, `min_minutes`, `max_minutes`, `max_age_days`,
+  `min_age_days`, `channels` (substring of channel name), `keywords` (substring of title/tags/description),
+  `about` (topics; matches if any applies).
+- Actions: `block` hides; `allow_only` means only matching videos may show (several combine with OR);
+  `boost` / `demote` change ranking. Optional `schedule` limits a rule to days/times (local time).
+- `topics` gives 6-8 example titles per `about` topic, for the on-device model. The output is validated and
+  cleaned by `sanitizeCompiled` in `rules.js`. Starter rules ship precompiled, with hand-written examples, so
+  the site works before any model is asked.
+
+### 2.2 Evaluation (`evaluate` in `rules.js`)
+
+- Not interested -> hide. Active `block` rule matches -> hide (reason shown). `allow_only` rules exist and none
+  match -> hide. "Show anyway" overrides a rule hide.
+- An `about` condition that hasn't been checked yet makes the result `pending`. The user chooses whether pending
+  videos are **hidden until checked** (default) or **shown until checked**.
+- Structural conditions short-circuit, so a Short or a 4-hour video is decided without any model.
+- The Hidden page lists every hidden feed video with its reason.
+
+## 3. Topic checks
+
+| Mode | How | Pros | Cons |
+|---|---|---|---|
+| **On this device** (default) | all-MiniLM-L6-v2 (8-bit, 23 MB) in a Web Worker via transformers.js + ONNX runtime wasm (27 MB), all served from the site. Score = best cosine similarity between the video text (title, tags, start of description) and the topic name or its example phrases. Match if score >= threshold (strict 0.28, balanced 0.34, loose 0.42). | No key, nothing leaves the device, no cost; ~50 ms per batch of videos once loaded. | ~50 MB one-time download; good at subjects, weaker at tone ("clickbait"). |
+| **Gemini** | Batches of 25 videos x up to 15 topics per request, JSON answer listing which topics apply. Newest stable Flash-Lite model picked from the model list (or set in Settings). Waits a minute on rate limits. | More accurate on nuance. | Needs a key; free-tier rate limits. |
+| **Off** | Topic rules never match. | | |
+
+Results are cached per video (`ft.scores` / `ft.labels`), so each video is checked once; applying new rules
+resets on-device scores (cheap to redo). Search results and the open video are checked before the feed.
+
+## 4. Front end
+
+- Single page, hash routes: `#feed`, `#search=QUERY`, `#watch=VIDEO_ID`, `#rules`, `#sources`, `#hidden`,
+  `#settings`. Vanilla JS rendering with template strings, escaped with `esc()`.
+- Watch page: player + title/channel/description, Like / Not interested / Open on YouTube, and "Up next":
+  videos seen this visit that pass the rules, ranked by same channel, shared words, category and feed score.
+- Status strip: feed refresh state, topic-check progress (including model download %), YouTube quota used today.
+- Responsive down to phone width; light and dark themes.
+
+## 5. Deployment
+
+- `npm run build:docs` writes the site into `docs/`, which Pages serves from the branch.
+- Blocker: GitHub secret scanning flags strings in the bundled ONNX runtime as a "Mistral AI API Key" (false
+  positive), so a push containing `docs/embed-worker.js` is rejected. Options: the repo owner marks it a false
+  positive, or Pages switches to the GitHub Actions workflow (`.github/workflows/pages.yml`) and built files stop
+  being committed (the workflow would also need to run `npm run fetch-model`).
+
+## 6. Possible next steps
+
+- Topic checks: parallel batches; check the visible part of the feed first; per-topic strictness; let the user
+  correct a wrong call and use it as another example.
+- Better "Up next" and source suggestions from likes/watch history (Gemini).
+- Scheduled feed refresh / sync across devices (would need a backend, e.g. Cloudflare Worker, which could also
+  keep keys server-side and restrict access to the owner).
