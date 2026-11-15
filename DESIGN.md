@@ -83,11 +83,12 @@ resets on-device scores (cheap to redo). Search results and the open video are c
 
 ## 5. Deployment
 
-- `npm run build:docs` writes the site into `docs/`, which Pages serves from the branch.
-- Blocker: GitHub secret scanning flags strings in the bundled ONNX runtime as a "Mistral AI API Key" (false
-  positive), so a push containing `docs/embed-worker.js` is rejected. Options: the repo owner marks it a false
-  positive, or Pages switches to the GitHub Actions workflow (`.github/workflows/pages.yml`) and built files stop
-  being committed (the workflow would also need to run `npm run fetch-model`).
+- GitHub Pages with source "GitHub Actions": `.github/workflows/pages.yml` runs on pushes that touch `web/`
+  (or manually), installs dependencies, downloads the on-device model (cached between runs), builds `web/dist`
+  and publishes it. Only source code is committed.
+- This replaced committing the built site to `docs/`, which pulled minified third-party code into the repo; GitHub
+  push protection flagged it (a model class name, `Mistral3ForConditionalGeneration`, matched the Mistral API key
+  pattern). Building in CI avoids that and keeps the repo small (the model and runtime are ~50 MB).
 
 ## 6. Possible next steps
 

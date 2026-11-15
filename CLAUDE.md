@@ -4,7 +4,7 @@ FilterTube is a static website that shows YouTube through rules the user writes 
 ("No Shorts", "hide celebrity gossip", "only coding videos on weekdays"). Read `DESIGN.md` for the product
 decisions and architecture; this file is the practical part: layout, commands, pitfalls, status.
 
-- Live site: https://arpitkh96.github.io/Test123/ (GitHub Pages, "Deploy from a branch", folder `/docs`)
+- Live site: https://arpitkh96.github.io/Test123/ (GitHub Pages, built and deployed by GitHub Actions)
 - Working branch: `claude/youtube-clone-filters-ujcasf` (also the repo's only/default branch)
 - The user's GitHub repo: `arpitkh96/Test123`
 
@@ -20,9 +20,7 @@ decisions and architecture; this file is the practical part: layout, commands, p
 | `web/src/local-model.js`, `web/src/embed-worker.js` | On-device topic checks: all-MiniLM-L6-v2 via transformers.js in a Web Worker |
 | `web/test/e2e.cjs` | Headless-Chromium end-to-end test with stubbed YouTube/Gemini (real on-device model) |
 | `web/build.mjs`, `web/fetch-model.mjs` | Build (app + worker + model + ONNX wasm into `dist/`); model download |
-| `docs/` | **Built output committed for GitHub Pages** (`npm run build:docs`). Don't edit by hand. |
-| `index.html` (root) | Redirects to `docs/` in case Pages is set to the repo root |
-| `.github/workflows/pages.yml` | Alternative deploy via GitHub Actions (only used if Pages source is switched to "GitHub Actions") |
+| `.github/workflows/pages.yml` | **The deploy.** On every push touching `web/`: `npm ci`, `npm run fetch-model` (cached), `npm run build`, publish `web/dist` to Pages. Requires Pages source = "GitHub Actions". |
 | `artifact/filtertube.html`, `tools/ingest.mjs` | **Superseded** first version: a claude.ai Artifact (https://claude.ai/artifact/UMMYkAda8aEgTNvSvjZg5M) fed by a Node ingest script. Kept for reference only. |
 
 ## Commands (run in `web/`)
@@ -31,13 +29,12 @@ decisions and architecture; this file is the practical part: layout, commands, p
 npm ci                 # install (esbuild, @huggingface/transformers pinned to 4.3.2)
 npm run fetch-model    # download the on-device model into web/models/ (gitignored; needs huggingface.co)
 npm run build          # -> web/dist/
-npm run build:docs     # build, then copy dist/ to ../docs/ for GitHub Pages. Commit docs/ after this.
 npm run dev            # watch + serve dist/ on :8080
 npm run test:e2e       # after build: 18 checks, exits non-zero on failure. Optional arg: screenshot dir
 ```
 
-Always run `npm run build && npm run test:e2e` after changing `web/src`, then `npm run build:docs` and commit
-both `web/` and `docs/`.
+Always run `npm run build && npm run test:e2e` after changing `web/src`. Commit source only: **never commit
+built output** (`dist/`, bundles, models). Pushing to the branch deploys via the Pages workflow.
 
 ## How it works (short)
 
@@ -64,11 +61,11 @@ both `web/` and `docs/`.
 - Embedding similarity against bare topic names is useless (Rust tutorial vs "programming" = 0.02). Matching
   against 5-8 example phrases per topic works (correct topic ~0.45-0.85, others < 0.3). Gemini writes the
   examples when rules are applied; starter rules have hand-written ones in `rules.js`.
-- **GitHub secret scanning false positive:** `docs/embed-worker.js` (bundled ONNX runtime) contains WebGPU limit
-  names such as `"maxStorageBuffersInFragmentStage"` (32 letters) that match the "Mistral AI API Key" pattern, so
-  push protection rejects the push. **Do not obfuscate/split strings to dodge the scanner** (that was blocked as
-  undermining a security control). The user must either mark it a false positive on GitHub or switch deployment
-  to GitHub Actions so built files aren't committed. See Status.
+- **Don't commit built bundles.** A committed bundle of transformers.js (`docs/embed-worker.js`) was rejected by
+  GitHub push protection as a "Mistral AI API Key": its list of model classes includes
+  `"Mistral3ForConditionalGeneration"` (32 characters). It was a false positive, but the fix was structural:
+  stop committing build output and let the Actions workflow build the site. **Never obfuscate or split strings
+  to get past a secret scanner** (that was rightly blocked as undermining a security control).
 - The YouTube embed needs `referrerpolicy="strict-origin-when-cross-origin"` on the iframe (and the page meta) or
   YouTube refuses to play. Use `youtube-nocookie.com/embed/ID?rel=0`.
 - The watch view must not rebuild the iframe on every render (it would restart the video): `renderWatch` only
@@ -97,15 +94,12 @@ both `web/` and `docs/`.
 - Concerned about key exposure on a public site: keys are only in the user's browser; recommend restricting the
   YouTube key to the YouTube API and the site's referrer.
 
-## Status (end of first session)
+## Status
 
-- Pushed: website with YouTube feed/search/embedded player, rules engine, Gemini rules + topic checks, separate keys.
-- **Not pushed (local commit "Add on-device topic checks with a small in-browser model", blocked by the secret-scanning false positive):** on-device topic model.
-  If this commit is missing from the remote, it was lost with the container: re-create it from the description
-  in `DESIGN.md` (local-model.js, embed-worker.js, build/fetch-model changes, Settings options).
-  Waiting on the user to pick:
-  - A) mark as false positive at https://github.com/arpitkh96/Test123/security/secret-scanning/unblock-secret/3M9EUO1siczM09qUPuGS9kzZcfW, then push; or
-  - B) set Pages source to "GitHub Actions", stop committing `docs/`, have `pages.yml` run `npm run fetch-model`
-    and the build.
-- Ideas not done yet: run topic checks in parallel; check what's on screen first; Claude/Gemini suggestions for
+- Done: website with YouTube feed/search/embedded player (fullscreen), rules engine, Gemini for applying rules
+  (separate Gemini key), topic checks on-device (default) / Gemini / off, end-to-end test, Actions-based deploy.
+- Built output (`docs/`, root `index.html` redirect) was removed from the repo when deployment moved to Actions.
+  The user has to set Settings -> Pages -> Source to "GitHub Actions" once; until then the old branch deploy has
+  nothing to serve. After switching, re-run the workflow ("Run workflow" in the Actions tab) if no run deployed.
+- Ideas not done yet: run topic checks in parallel; check what's on screen first; Gemini suggestions for
   sources; smarter Up next; scheduled feed refresh.
