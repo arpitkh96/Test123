@@ -1,5 +1,5 @@
 // Rule engine: compiled rules -> show / hide / pending for each video.
-// A rule's `when` conditions must all hold; `about` conditions are judged by Claude
+// A rule's `when` conditions must all hold; `about` conditions are judged by a model (Gemini)
 // and cached per video in `labels` ({ [critKey]: boolean }).
 
 export const DAYS = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
@@ -10,7 +10,7 @@ Hide clickbait titles.
 Nothing longer than 2 hours.
 Show more programming and science.`;
 
-// Starter rules, precompiled so Shorts are filtered before Claude is ever asked.
+// Starter rules, precompiled so Shorts are filtered before any model is asked.
 export const DEFAULT_COMPILED = {
   rules: [
     { id: "r1", action: "block", text: "Hide Shorts", when: { is_short: true } },

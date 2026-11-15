@@ -22,6 +22,58 @@ const RESPONSE_SCHEMA = {
   required: ["results"],
 };
 
+// Gemini's response schema (an OpenAPI subset): rules -> structured filters.
+const COMPILE_SCHEMA = {
+  type: "OBJECT",
+  properties: {
+    notes: { type: "STRING" },
+    rules: {
+      type: "ARRAY",
+      items: {
+        type: "OBJECT",
+        properties: {
+          action: { type: "STRING", enum: ["block", "allow_only", "boost", "demote"] },
+          text: { type: "STRING" },
+          when: {
+            type: "OBJECT",
+            properties: {
+              is_short: { type: "BOOLEAN" }, is_live: { type: "BOOLEAN" },
+              min_minutes: { type: "NUMBER" }, max_minutes: { type: "NUMBER" },
+              max_age_days: { type: "NUMBER" }, min_age_days: { type: "NUMBER" },
+              channels: { type: "ARRAY", items: { type: "STRING" } },
+              keywords: { type: "ARRAY", items: { type: "STRING" } },
+              about: { type: "ARRAY", items: { type: "STRING" } },
+            },
+          },
+          schedule: {
+            type: "OBJECT",
+            properties: {
+              days: { type: "ARRAY", items: { type: "STRING", enum: ["sun", "mon", "tue", "wed", "thu", "fri", "sat"] } },
+              from: { type: "STRING" }, to: { type: "STRING" },
+            },
+          },
+        },
+        required: ["action", "text", "when"],
+      },
+    },
+  },
+  required: ["rules", "notes"],
+};
+
+const COMPILE_PROMPT = `You convert a person's plain-English rules for their YouTube feed into structured filters.
+
+"when" fields (all optional; ALL present fields must hold for the rule to match):
+- is_short: YouTube Shorts. is_live: live streams.
+- min_minutes / max_minutes: video length. max_age_days / min_age_days: upload age.
+- channels: channel names (substring match). keywords: words in title, tags or description (substring match).
+- about: short topic, style or quality descriptions judged by an AI from the title, channel and description; matches if ANY applies. Use it for themes ("politics", "video games"), styles ("reaction video", "prank") and qualities ("clickbait title", "rage bait").
+"schedule" (optional; the rule applies only then): days, and from / to as 24-hour "HH:MM" local time.
+
+Actions: "block" hides matches. "allow_only" means only matching videos may show (several allow_only rules combine with OR). "boost" / "demote" change ranking.
+Write "text" as a short plain restatement of the rule. Keep "about" descriptions short and specific, one rule per idea, and ignore anything that is not about which videos to show. Put anything you could not express in "notes" (else an empty string).
+
+Example: "No shorts. Only coding or maths videos on weekdays 9 to 5. Less gaming." gives a block rule {is_short: true}; an allow_only rule {about: ["programming", "mathematics"]} with schedule {days: [mon..fri], from: "09:00", to: "17:00"}; and a demote rule {about: ["video games"]}.`;
+
 const versionOf = (name) => (name.match(/(\d+(?:\.\d+)?)/) || [0, "0"])[1].split(".").map(Number);
 const newer = (a, b) => { const x = versionOf(a), y = versionOf(b); return (x[0] - y[0]) || ((x[1] || 0) - (y[1] || 0)); };
 
@@ -57,11 +109,28 @@ export function createGemini(key, preferredModel = "") {
     return model;
   }
 
+  async function generateJSON(prompt, schema) {
+    const m = await getModel();
+    const body = await call(`models/${m}:generateContent`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        contents: [{ role: "user", parts: [{ text: prompt }] }],
+        generationConfig: { responseMimeType: "application/json", responseSchema: schema, temperature: 0 },
+      }),
+    });
+    if (body.promptFeedback?.blockReason) throw new GeminiError("Gemini declined this request. Try rewording.", "blocked");
+    const text = (body.candidates?.[0]?.content?.parts || []).map((p) => p.text || "").join("");
+    try { return JSON.parse(text); } catch { throw new GeminiError("Gemini’s answer couldn’t be read. Try again.", "json"); }
+  }
+
   return {
     get model() { return model; },
+    compileRules(text) {
+      return generateJSON(`${COMPILE_PROMPT}\n\nThe person's rules:\n"""\n${text.slice(0, 4000)}\n"""`, COMPILE_SCHEMA);
+    },
     /** videos: [{id,title,channel,category,tags,description}], criteria: [string] -> { [id]: Set<criterion> } */
     async classify(videos, criteria) {
-      const m = await getModel();
       const prompt = `For each YouTube video below, decide which of these criteria apply, judging only from its title, channel, category, tags and description.
 
 Criteria:
@@ -71,17 +140,7 @@ Videos (JSON):
 ${JSON.stringify(videos)}
 
 Return one result per video id, listing the codes (like "c2") of the criteria that clearly apply; an empty list if none do.`;
-      const body = await call(`models/${m}:generateContent`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          contents: [{ role: "user", parts: [{ text: prompt }] }],
-          generationConfig: { responseMimeType: "application/json", responseSchema: RESPONSE_SCHEMA, temperature: 0 },
-        }),
-      });
-      const text = (body.candidates?.[0]?.content?.parts || []).map((p) => p.text || "").join("");
-      let out;
-      try { out = JSON.parse(text); } catch { throw new GeminiError("Gemini’s answer couldn’t be read.", "json"); }
+      const out = await generateJSON(prompt, RESPONSE_SCHEMA);
       const map = {};
       for (const r of out.results || []) {
         map[String(r.id)] = new Set((r.matches || []).map((code) => criteria[parseInt(String(code).replace(/\D/g, ""), 10) - 1]).filter(Boolean));
