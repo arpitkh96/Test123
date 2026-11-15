@@ -27,6 +27,14 @@ const COMPILE_SCHEMA = {
   type: "OBJECT",
   properties: {
     notes: { type: "STRING" },
+    topics: {
+      type: "ARRAY",
+      items: {
+        type: "OBJECT",
+        properties: { name: { type: "STRING" }, examples: { type: "ARRAY", items: { type: "STRING" } } },
+        required: ["name", "examples"],
+      },
+    },
     rules: {
       type: "ARRAY",
       items: {
@@ -57,7 +65,7 @@ const COMPILE_SCHEMA = {
       },
     },
   },
-  required: ["rules", "notes"],
+  required: ["rules", "topics", "notes"],
 };
 
 const COMPILE_PROMPT = `You convert a person's plain-English rules for their YouTube feed into structured filters.
@@ -70,6 +78,8 @@ const COMPILE_PROMPT = `You convert a person's plain-English rules for their You
 "schedule" (optional; the rule applies only then): days, and from / to as 24-hour "HH:MM" local time.
 
 Actions: "block" hides matches. "allow_only" means only matching videos may show (several allow_only rules combine with OR). "boost" / "demote" change ranking.
+For EVERY distinct "about" description you use, add an entry to "topics" with that exact text as "name" and 6-8 "examples": short phrases that look like real YouTube video titles on that topic, covering its typical variety (for "politics": "senate passes budget bill", "election debate highlights", "president's speech on immigration"). A small on-device model compares videos with these examples, so make them concrete and varied, not definitions.
+
 Write "text" as a short plain restatement of the rule. Keep "about" descriptions short and specific, one rule per idea, and ignore anything that is not about which videos to show. Put anything you could not express in "notes" (else an empty string).
 
 Example: "No shorts. Only coding or maths videos on weekdays 9 to 5. Less gaming." gives a block rule {is_short: true}; an allow_only rule {about: ["programming", "mathematics"]} with schedule {days: [mon..fri], from: "09:00", to: "17:00"}; and a demote rule {about: ["video games"]}.`;

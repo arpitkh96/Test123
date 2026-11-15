@@ -1,6 +1,7 @@
 import { DEFAULT_TEXT, DEFAULT_COMPILED, sanitizeCompiled, ruleActive, evaluate, score, similarity, critKey } from "./rules.js";
 import { createYouTube } from "./youtube.js";
 import { createGemini } from "./gemini.js";
+import { scoreVideos, STRICTNESS, setProgressHandler } from "./local-model.js";
 
 /* ---------------- storage (this browser only) ---------------- */
 const load = (k, d) => { try { const v = JSON.parse(localStorage.getItem(k)); return v ?? d; } catch { return d; } };
@@ -14,17 +15,18 @@ const EXAMPLE_SOURCES = [
 
 const state = {
   route: { view: "feed" },
-  settings: { ytKey: "", geminiKey: "", geminiModel: "", refreshHours: 3, topicCheck: "gemini", ...load("ft.settings", {}) },
+  settings: { ytKey: "", geminiKey: "", geminiModel: "", refreshHours: 3, topicCheck: "local", strictness: "balanced", ...load("ft.settings", {}) },
   prefs: { rulesText: DEFAULT_TEXT, compiled: DEFAULT_COMPILED, mode: "strict", channels: {}, watched: {}, liked: {}, notInterested: {}, override: {}, ...load("ft.prefs", {}) },
   sources: load("ft.sources", EXAMPLE_SOURCES),
   pool: load("ft.pool", { videos: {}, lastRefresh: null }), // feed videos by id
-  labels: load("ft.labels", {}),                               // id -> { critKey: bool }
+  labels: load("ft.labels", {}),                               // Gemini answers: id -> { critKey: bool }
+  scores: load("ft.scores", {}),                               // on-device scores: id -> { critKey: similarity }
   units: load("ft.units", { day: "", used: 0 }),
   known: new Map(),        // every video seen this visit (feed, search, watch) by id
   search: { q: "", ids: [], next: null, loading: false, error: "", total: null, showHidden: false },
   refresh: { running: false, error: "" },
   compile: { running: false, error: "" },
-  classify: { running: false, error: "", waitUntil: 0 },
+  classify: { running: false, error: "", waitUntil: 0, loading: null },
 };
 delete state.settings.claudeKey; delete state.settings.model; // from the earlier Claude version
 state.prefs.compiled = sanitizeCompiled(state.prefs.compiled);
@@ -34,9 +36,11 @@ for (const v of Object.values(state.pool.videos)) state.known.set(v.id, v);
 
 const savePrefs = () => save("ft.prefs", state.prefs);
 const saveLabels = () => {
-  const ids = Object.keys(state.labels);
-  if (ids.length > 4000) for (const id of ids.slice(0, ids.length - 3000)) delete state.labels[id];
-  save("ft.labels", state.labels);
+  for (const [key, store] of [["ft.labels", state.labels], ["ft.scores", state.scores]]) {
+    const ids = Object.keys(store);
+    if (ids.length > 4000) for (const id of ids.slice(0, ids.length - 3000)) delete store[id];
+    save(key, store);
+  }
 };
 function savePool() {
   const vids = Object.values(state.pool.videos).sort((a, b) => Date.parse(b.publishedAt) - Date.parse(a.publishedAt)).slice(0, 600);
@@ -81,7 +85,13 @@ function ago(iso) {
   return "just now";
 }
 const NO_TOPICS = new Proxy({}, { get: () => false }); // topic checks off: topic rules never match
-const ev = (v) => evaluate(v, state.prefs, state.settings.topicCheck === "off" ? NO_TOPICS : state.labels[v.id]);
+const topicMode = () => state.settings.topicCheck;
+const ev = (v) => {
+  const m = topicMode();
+  if (m === "off") return evaluate(v, state.prefs, NO_TOPICS);
+  if (m === "local") return evaluate(v, state.prefs, state.scores[v.id], STRICTNESS[state.settings.strictness] ?? STRICTNESS.balanced);
+  return evaluate(v, state.prefs, state.labels[v.id]);
+};
 const watchHref = (id) => "#watch=" + encodeURIComponent(id);
 function bumpChannel(v, d) { if (v) state.prefs.channels[v.channelId] = (state.prefs.channels[v.channelId] || 0) + d; }
 
@@ -175,6 +185,7 @@ async function compileRules() {
     state.prefs.compiled = compiled;
     state.prefs.override = {};
     savePrefs();
+    state.scores = {}; saveLabels(); // topics' example phrases may have changed; on-device scoring is quick to redo
     state.classify.error = "";
   } catch (e) { state.compile.error = e.message; }
   state.compile.running = false;
@@ -195,10 +206,12 @@ function needed() {
   return need;
 }
 let pumpTimer = null;
+setProgressHandler(({ loaded, total }) => { state.classify.loading = total ? Math.round((loaded / total) * 100) : null; renderStrip(); });
 function schedulePump(delay = 200) { if (!pumpTimer) pumpTimer = setTimeout(() => { pumpTimer = null; pump(); }, delay); }
 async function pump() {
   const k = state.classify;
-  if (!gemini || state.settings.topicCheck !== "gemini" || k.running || k.error) return;
+  const mode = topicMode();
+  if (mode === "off" || (mode === "gemini" && !gemini) || k.running || k.error) return;
   if (Date.now() < k.waitUntil) return schedulePump(k.waitUntil - Date.now());
   let need = needed();
   if (!need.size) return;
@@ -207,14 +220,26 @@ async function pump() {
     while (need.size) {
       // The open video and search results first, then the feed.
       const prio = [state.route.view === "watch" ? state.route.id : null, ...state.search.ids].filter((id) => need.has(id));
-      const ids = [...new Set([...prio, ...need.keys()])].slice(0, 25);
-      const crit = [...new Set(ids.flatMap((id) => [...need.get(id)]))].slice(0, 15);
-      const list = ids.map((id) => { const v = state.known.get(id); return { id, title: v.title, channel: v.channel, category: v.category, tags: (v.tags || []).slice(0, 8), description: (v.description || "").slice(0, 300) }; });
-      const res = await gemini.classify(list, crit);
-      for (const id of ids) {
-        const hits = res[id] || new Set();
-        const lab = (state.labels[id] ||= {});
-        for (const c of crit) if (need.get(id)?.has(c)) lab[critKey(c)] = hits.has(c);
+      if (mode === "local") {
+        const ids = [...new Set([...prio, ...need.keys()])].slice(0, 64);
+        const topics = {};
+        for (const id of ids) for (const c of need.get(id)) topics[c] = state.prefs.compiled.topics?.[c] || [];
+        const res = await scoreVideos(ids.map((id) => state.known.get(id)), topics);
+        for (const id of ids) {
+          const sc = (state.scores[id] ||= {});
+          for (const c of need.get(id)) sc[critKey(c)] = res[id]?.[c] ?? -1;
+        }
+        k.loading = null;
+      } else {
+        const ids = [...new Set([...prio, ...need.keys()])].slice(0, 25);
+        const crit = [...new Set(ids.flatMap((id) => [...need.get(id)]))].slice(0, 15);
+        const list = ids.map((id) => { const v = state.known.get(id); return { id, title: v.title, channel: v.channel, category: v.category, tags: (v.tags || []).slice(0, 8), description: (v.description || "").slice(0, 300) }; });
+        const res = await gemini.classify(list, crit);
+        for (const id of ids) {
+          const hits = res[id] || new Set();
+          const lab = (state.labels[id] ||= {});
+          for (const c of crit) if (need.get(id)?.has(c)) lab[critKey(c)] = hits.has(c);
+        }
       }
       saveLabels();
       render();
@@ -222,7 +247,7 @@ async function pump() {
     }
   } catch (e) {
     if (e.code === "rate") { k.waitUntil = Date.now() + 60e3; schedulePump(60e3); }
-    else k.error = e.message;
+    else k.error = mode === "local" ? `The on-device model couldn’t run in this browser (${e.message}). Try Gemini in Settings.` : e.message;
   } finally {
     k.running = false;
     renderStrip();
@@ -278,9 +303,10 @@ function renderStrip() {
   else if (state.pool.lastRefresh) parts.push(`<span class="chip"><span class="dot on"></span>Feed refreshed ${esc(ago(state.pool.lastRefresh))} <button class="linkbtn" data-refresh>Refresh</button></span>`);
   const k = state.classify, need = needed().size;
   if (k.error) parts.push(`<span class="chip"><span class="dot err"></span>${esc(k.error)} <button class="linkbtn" data-resume>Retry</button></span>`);
-  else if (k.running) parts.push(`<span class="chip"><span class="dot busy"></span>Gemini is checking ${need} videos against your topic rules</span>`);
+  else if (k.running && k.loading != null) parts.push(`<span class="chip"><span class="dot busy"></span>Downloading the on-device topic model (one time): ${k.loading}%</span>`);
+  else if (k.running) parts.push(`<span class="chip"><span class="dot busy"></span>${topicMode() === "local" ? "Checking" : "Gemini is checking"} ${need} videos against your topic rules${topicMode() === "local" ? " on this device" : ""}</span>`);
   else if (need && Date.now() < k.waitUntil) parts.push(`<span class="chip"><span class="dot"></span>Gemini’s free rate limit was reached; ${need} videos will be checked in a minute</span>`);
-  else if (need && !gemini && state.settings.ytKey) parts.push(`<span class="chip"><span class="dot"></span>${need} videos wait for topic checks. <a href="#settings">Add a Gemini key</a></span>`);
+  else if (need && topicMode() === "gemini" && !gemini && state.settings.ytKey) parts.push(`<span class="chip"><span class="dot"></span>${need} videos wait for topic checks. <a href="#settings">Add a Gemini key</a></span>`);
   if (state.units.day === ptDay() && state.units.used) parts.push(`<span title="Free daily YouTube quota is 10,000 units">YouTube quota used today: ${state.units.used.toLocaleString()} / 10,000</span>`);
   $("#strip").innerHTML = parts.join("");
 }
@@ -371,7 +397,7 @@ function setupCard() {
   return `<div class="col"><div><h1>Set up FilterTube</h1><p class="lede">FilterTube shows YouTube through rules you write in plain English. It runs entirely in your browser with your own keys.</p></div>
     <section class="panel"><ol class="steps">
       <li><a href="#settings">Add a YouTube Data API key</a> to load videos, search and play them here.</li>
-      <li><a href="#settings">Add a Gemini API key</a> so you can write rules in plain English and topic rules like “no politics” or “no clickbait” work.</li>
+      <li>Optionally <a href="#settings">add a Gemini API key</a> to write your own rules in plain English. Topic rules like “no politics” are checked on your device by default, with no key.</li>
       <li>Pick channels and topics under <a href="#sources">Sources</a> and write your <a href="#rules">Rules</a>.</li>
     </ol><div><a class="btn" href="#settings">Open Settings</a></div></section></div>`;
 }
@@ -418,7 +444,8 @@ function rulesView() {
         return `<li class="rule ${on ? "" : "off"}"><span class="pill ${cls}">${lab}</span><span class="txt">${esc(r.text)}${r.schedule ? ` <span class="note">(${esc(describeSchedule(r.schedule))}${on ? "" : ", not active now"})</span>` : ""}</span><span class="cond">${esc(describeWhen(r.when))}</span></li>`;
       }).join("")}</ul>` : '<p class="note">No rules yet: every video is shown.</p>'}
       ${p.compiled.notes ? `<p class="note">Note: ${esc(p.compiled.notes)}</p>` : ""}
-      <p class="note">Conditions marked <code>about:</code> are checked by Gemini from each video’s title, channel, tags and description, about 25 videos per request, once per video. The other conditions are checked instantly.</p>
+      ${topicMode() === "local" && Object.keys(p.compiled.topics || {}).length ? `<details><summary class="note">Example phrases the on-device model looks for</summary><ul class="note">${Object.entries(p.compiled.topics).map(([t, ex]) => `<li><strong>${esc(t)}</strong>: ${esc(ex.join(" · ") || "(topic name only)")}</li>`).join("")}</ul></details>` : ""}
+      <p class="note">Conditions marked <code>about:</code> are checked ${topicMode() === "local" ? "on this device by a small model that compares each video’s title, tags and description with the example phrases above" : topicMode() === "gemini" ? "by Gemini from each video’s title, channel, tags and description" : "nowhere: topic checks are off in Settings, so they never match"}, once per video. The other conditions are checked instantly.</p>
     </section></div>`;
 }
 
@@ -467,9 +494,14 @@ function settingsView() {
       <div class="field"><label for="geminiKey">Gemini API key</label><input id="geminiKey" type="password" autocomplete="off" value="${esc(s.geminiKey)}" placeholder="AIza…">
         <p class="note">Get one at <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">aistudio.google.com/apikey</a>. Used to turn your written rules into filters and, below, to check topic rules. The free tier is enough for personal use.</p></div>
       <div class="field"><label for="topicCheck">Topic checks</label><select id="topicCheck">
-        <option value="gemini" ${s.topicCheck === "gemini" ? "selected" : ""}>Gemini (uses the key above)</option>
+        <option value="local" ${s.topicCheck === "local" ? "selected" : ""}>On this device (no key; about 50 MB downloaded once)</option>
+        <option value="gemini" ${s.topicCheck === "gemini" ? "selected" : ""}>Gemini (more accurate; uses the key above)</option>
         <option value="off" ${s.topicCheck === "off" ? "selected" : ""}>Off (topic rules never match)</option></select>
-        <p class="note">Topic rules are ones like “no politics” or “boost programming”. ${gemini?.model ? `Using <code>${esc(gemini.model)}</code>.` : ""}</p></div>
+        <p class="note">Topic rules are ones like “no politics” or “boost programming”. On this device, a small model compares each video with example phrases for each topic; nothing is sent anywhere. It’s good at subjects (coding, cooking, politics) and weaker at tone (“clickbait”). ${gemini?.model ? `Gemini model in use: <code>${esc(gemini.model)}</code>.` : ""}</p></div>
+      <div class="field"><label for="strictness">On-device strictness</label><select id="strictness">
+        <option value="strict" ${s.strictness === "strict" ? "selected" : ""}>Strict: catches more, may hide videos that only touch a topic</option>
+        <option value="balanced" ${s.strictness === "balanced" ? "selected" : ""}>Balanced</option>
+        <option value="loose" ${s.strictness === "loose" ? "selected" : ""}>Loose: only clear matches</option></select></div>
       <div class="field"><label for="geminiModel">Gemini model <span class="note">(optional)</span></label><input id="geminiModel" value="${esc(s.geminiModel)}" placeholder="Automatic: newest Flash-Lite model">
         <p class="note">Leave blank to pick the newest stable Flash-Lite model automatically.</p></div>
       <div class="field"><label for="refreshHours">Refresh the feed every</label><select id="refreshHours">${[1, 3, 6, 12, 24].map((h) => `<option value="${h}" ${h === s.refreshHours ? "selected" : ""}>${h} hour${h > 1 ? "s" : ""}</option>`).join("")}</select></div>
@@ -496,7 +528,7 @@ document.addEventListener("click", (e) => {
   else if ("resume" in d) { state.classify.error = ""; }
   else if ("more" in d) { runSearch(state.search.q, true); return; }
   else if ("toggleHidden" in d) { state.search.showHidden = !state.search.showHidden; }
-  else if ("clear" in d) { state.pool = { videos: {}, lastRefresh: null }; state.labels = {}; save("ft.pool", state.pool); save("ft.labels", {}); }
+  else if ("clear" in d) { state.pool = { videos: {}, lastRefresh: null }; state.labels = {}; state.scores = {}; save("ft.pool", state.pool); save("ft.labels", {}); save("ft.scores", {}); }
   render();
 });
 document.addEventListener("input", (e) => {
@@ -524,7 +556,7 @@ document.addEventListener("submit", (e) => {
   } else if (e.target.id === "settingsForm") {
     e.preventDefault();
     const before = state.settings.ytKey;
-    Object.assign(state.settings, { ytKey: $("#ytKey").value.trim(), geminiKey: $("#geminiKey").value.trim(), geminiModel: $("#geminiModel").value.trim(), refreshHours: +$("#refreshHours").value, topicCheck: $("#topicCheck").value });
+    Object.assign(state.settings, { ytKey: $("#ytKey").value.trim(), geminiKey: $("#geminiKey").value.trim(), geminiModel: $("#geminiModel").value.trim(), refreshHours: +$("#refreshHours").value, topicCheck: $("#topicCheck").value, strictness: $("#strictness").value });
     save("ft.settings", state.settings);
     connectClients();
     state.classify.error = "";
