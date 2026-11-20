@@ -46,8 +46,20 @@ const calls = { keys: new Set(), geminiTopic: 0, compile: 0, anthropic: 0 };
   await pg.route("https://www.googleapis.com/**", (r) => {
     const u = new URL(r.request().url()), ep = u.pathname.split("/").pop();
     calls.keys.add("youtube:" + u.searchParams.get("key"));
-    if (ep === "channels") return json(r, { items: [{ id: "UC1", snippet: { title: "Code Lab" }, contentDetails: { relatedPlaylists: { uploads: "UU1" } } }] });
-    if (ep === "playlistItems") return json(r, { items: [{ contentDetails: { videoId: "v1" } }, { contentDetails: { videoId: "v2" } }] });
+    if (ep === "channels") {
+      // Every handle exists; its channel id is derived from the handle (22 chars after "UC").
+      const h = u.searchParams.get("forHandle");
+      const mk = (handle) => ({ id: "UC" + handle.replace(/\W/g, "").padEnd(22, "x").slice(0, 22), snippet: { title: handle.slice(1), description: "", thumbnails: {} } });
+      calls.handleLookups = (calls.handleLookups || 0) + (h ? 1 : 0);
+      return json(r, { items: h ? [mk(h)] : [] });
+    }
+    if (ep === "playlistItems") {
+      const pl = u.searchParams.get("playlistId");
+      const uploads = { harkirat1: ["v1"], Computerphile: ["v4"], tseries: ["v2"] };
+      const key = Object.keys(uploads).find((k) => pl === "UU" + ("@" + k).replace(/\W/g, "").padEnd(22, "x").slice(0, 22));
+      calls.uploadCalls = (calls.uploadCalls || 0) + 1;
+      return json(r, { items: (uploads[key] || []).map((videoId) => ({ contentDetails: { videoId } })) });
+    }
     if (ep === "search") return json(r, { items: ["v3", "v4", "v5"].map((id) => ({ id: { videoId: id } })), pageInfo: { totalResults: 3 } });
     if (ep === "videos") return json(r, { items: (u.searchParams.get("id") || "").split(",").filter((id) => VIDS[id]).map(item) });
     return json(r, {});
@@ -111,6 +123,29 @@ const calls = { keys: new Set(), geminiTopic: 0, compile: 0, anthropic: 0 };
   await pg.click("#winfo [data-like]"); await pg.waitForTimeout(200);
   check("player survives a re-render", await ifr.evaluate((e) => e.isConnected));
   if (shots) await pg.screenshot({ path: path.join(shots, "watch.png") });
+
+  // Categories: subscriptions are pre-sorted; chips open one category
+  await pg.goto(BASE + "#feed"); await pg.waitForTimeout(300);
+  const chips = await pg.$$eval(".chips .chipbtn", (e) => e.map((x) => x.textContent));
+  check("category chips from subscriptions", chips.includes("Science & math") && chips.includes("Fitness & health") && !chips.includes("Rust"), JSON.stringify(chips));
+  check("one handle lookup per subscription", calls.handleLookups >= 80, String(calls.handleLookups));
+  await pg.goto(BASE + "#cat=science");
+  await pg.waitForFunction(() => !/Finding matching/.test(document.querySelector("main").textContent), null, { timeout: 60000 });
+  const sci = await pg.$$eval(".card .title", (e) => e.map((x) => x.textContent));
+  check("Science shows Computerphile's video only", JSON.stringify(sci) === JSON.stringify(["How black holes evaporate"]), JSON.stringify(sci));
+
+  // Add a suggested Rust channel; Rust chip appears and picks up the Rust video from another channel
+  await pg.goto(BASE + "#sources"); await pg.waitForTimeout(300);
+  check("subscriptions listed on Sources", /Following \((8\d)\)/.test(await pg.textContent("main")));
+  await pg.check('input[name="sugg"][value="@jonhoo"]');
+  await pg.click('#suggForm button[type="submit"]');
+  await pg.waitForTimeout(1500);
+  await pg.goto(BASE + "#cat=rust");
+  await pg.waitForFunction(() => !/Finding matching/.test(document.querySelector("main").textContent), null, { timeout: 60000 });
+  await pg.waitForTimeout(300);
+  const rust = await pg.$$eval(".card", (e) => e.map((x) => x.querySelector(".title").textContent + " | " + (x.querySelector(".why")?.textContent || "")));
+  check("Rust category finds the Rust video via on-device match", rust.some((x) => x.startsWith("Building an HTTP server in Rust") && /Matches Rust/.test(x)), JSON.stringify(rust));
+  if (shots) await pg.screenshot({ path: path.join(shots, "rust.png") });
 
   // Apply new rules with Gemini; on-device model uses Gemini's example phrases
   await pg.goto(BASE + "#rules"); await pg.waitForTimeout(300);

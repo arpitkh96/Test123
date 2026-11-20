@@ -36,6 +36,7 @@ function embed(texts) {
 
 const dot = (a, b) => { let s = 0; for (let i = 0; i < a.length; i++) s += a[i] * b[i]; return s; };
 const protoCache = new Map(); // phrase -> vector
+const textCache = new Map();  // item text -> vector (videos and channels), so re-scoring is cheap
 
 /** How similar a video must be to a topic's examples to count as a match. */
 export const STRICTNESS = { strict: 0.28, balanced: 0.34, loose: 0.42 };
@@ -52,7 +53,14 @@ export async function scoreVideos(videos, topics) {
     const vecs = await embed(phrases);
     phrases.forEach((p, i) => protoCache.set(p, vecs[i]));
   }
-  const vvecs = await embed(videos.map(videoText));
+  const texts = videos.map(videoText);
+  const missing = [...new Set(texts.filter((t) => !textCache.has(t)))];
+  if (missing.length) {
+    const vecs = await embed(missing);
+    missing.forEach((t, i) => textCache.set(t, vecs[i]));
+    if (textCache.size > 5000) for (const k of [...textCache.keys()].slice(0, 1000)) textCache.delete(k);
+  }
+  const vvecs = texts.map((t) => textCache.get(t));
   const out = {};
   videos.forEach((v, i) => {
     out[v.id] = {};

@@ -7,6 +7,13 @@ export class YouTubeError extends Error {
   constructor(message, reason) { super(message); this.reason = reason; }
 }
 
+/** Runs fn over items with at most `n` in flight; rejects on the first error. */
+export async function pool(items, n, fn) {
+  let i = 0;
+  const workers = Array.from({ length: Math.min(n, items.length) }, async () => { while (i < items.length) { const it = items[i++]; await fn(it); } });
+  await Promise.all(workers);
+}
+
 export function createYouTube(key, onUnits = () => {}) {
   async function api(endpoint, params, cost = 1) {
     if (!key) throw new YouTubeError("Add your YouTube API key in Settings.", "noKey");
@@ -57,8 +64,32 @@ export function createYouTube(key, onUnits = () => {}) {
     return out;
   }
 
+  /** Channel info for sources: [{ value: "@handle" | "UC…" }] -> Map(value -> { channelId, title, description, thumb }).
+   *  UC ids are looked up 50 per call (1 unit); each handle costs 1 unit. Missing ones are left out. */
+  async function channelsInfo(values) {
+    const out = new Map();
+    const pick = (c) => ({ channelId: c.id, title: c.snippet.title, description: (c.snippet.description || "").slice(0, 300), thumb: c.snippet.thumbnails?.default?.url || "" });
+    const ids = values.filter((v) => /^UC[\w-]{22}$/.test(v));
+    for (let i = 0; i < ids.length; i += 50) {
+      const r = await api("channels", { part: "snippet", id: ids.slice(i, i + 50).join(","), maxResults: "50" });
+      for (const c of r.items || []) out.set(c.id, pick(c));
+    }
+    const handles = values.filter((v) => !/^UC[\w-]{22}$/.test(v));
+    await pool(handles, 6, async (h) => {
+      const r = await api("channels", { part: "snippet", forHandle: h.replace(/^@?/, "@") });
+      if (r.items?.[0]) out.set(h, pick(r.items[0]));
+    });
+    return out;
+  }
+
   return {
     details,
+    channelsInfo,
+    /** Latest uploads of a channel (1 unit): every channel's uploads playlist is its id with "UC" -> "UU". */
+    async uploads(channelId, max = 10) {
+      const r = await api("playlistItems", { part: "contentDetails", playlistId: "UU" + channelId.slice(2), maxResults: String(max) });
+      return (r.items || []).map((it) => it.contentDetails.videoId);
+    },
     /** Full YouTube search: 100 units per page + 1 for details. */
     async search(q, pageToken) {
       const r = await api("search", { part: "id", q, type: "video", maxResults: "25", safeSearch: "none", ...(pageToken ? { pageToken } : {}) }, 100);

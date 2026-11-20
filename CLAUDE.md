@@ -16,7 +16,9 @@ decisions and architecture; this file is the practical part: layout, commands, p
 | `web/src/main.js` | App: state, hash routing, views (feed, search, watch, rules, sources, hidden, settings), feed refresh, topic-check queue |
 | `web/src/rules.js` | Rule engine: compiled rules -> show / hide / pending per video; ranking; "Up next" similarity; starter rules with topic example phrases |
 | `web/src/youtube.js` | YouTube Data API v3 client (browser, user's key) |
-| `web/src/gemini.js` | Gemini API client: turns written rules into structured filters; optional topic checks |
+| `web/src/gemini.js` | Gemini API client: turns written rules into structured filters; optional topic checks; sorts channels into categories |
+| `web/src/subscriptions.js` | **The owner's YouTube subscriptions** (handles, names, category), taken once from YouTube's sidebar. Default sources; merged into existing browsers once per `SUBSCRIPTIONS_VERSION`. Public repo, so this list is public. |
+| `web/src/catalog.js` | Default categories (with example phrases for the on-device model) and the curated "suggested technical channels" list (handles from memory, not verified) |
 | `web/src/local-model.js`, `web/src/embed-worker.js` | On-device topic checks: all-MiniLM-L6-v2 via transformers.js in a Web Worker |
 | `web/test/e2e.cjs` | Headless-Chromium end-to-end test with stubbed YouTube/Gemini (real on-device model) |
 | `web/build.mjs`, `web/fetch-model.mjs` | Build (app + worker + model + ONNX wasm into `dist/`); model download |
@@ -30,7 +32,7 @@ npm ci                 # install (esbuild, @huggingface/transformers pinned to 4
 npm run fetch-model    # download the on-device model into web/models/ (gitignored; needs huggingface.co)
 npm run build          # -> web/dist/
 npm run dev            # watch + serve dist/ on :8080
-npm run test:e2e       # after build: 18 checks, exits non-zero on failure. Optional arg: screenshot dir
+npm run test:e2e       # after build: 23 checks, exits non-zero on failure. Optional arg: screenshot dir
 ```
 
 Always run `npm run build && npm run test:e2e` after changing `web/src`. Commit source only: **never commit
@@ -46,10 +48,19 @@ built output** (`dist/`, bundles, models). Pushing to the branch deploys via the
   Only `about` (topics like "politics", "clickbait") needs a model; everything else is plain code.
 - Topic checks (`settings.topicCheck`): `local` (default, on-device, scores in `ft.scores`, threshold by
   `settings.strictness`: strict 0.28 / balanced 0.34 / loose 0.42), `gemini` (booleans in `ft.labels`), or `off`.
+- There is deliberately **no import parser in the app** (user's choice): to update subscriptions, edit
+  `web/src/subscriptions.js` (parse what the user pastes, once) and bump `SUBSCRIPTIONS_VERSION`.
 - A video is `show`, `hide` (with reasons) or `pending` (strict mode: hidden until its topics are checked).
+- **Categories** (`ft.categories`, defaults in `catalog.js`): each source has one `category`. Feed chips (`#cat=<id>`) show
+  videos from that category's channels **or** videos the on-device model matches to the category's example
+  phrases (similarity >= 0.36, `CATEGORY_MATCH` in main.js; scored lazily per category, in memory). "Search YouTube
+  for more" runs a normal search for the category name. Channels without a category can be auto-sorted ("Sort
+  unsorted"): Gemini if a key is set, else the on-device model on channel name + description.
+- Feed refresh: channel ids are resolved once (`channels.list`, 1 unit per handle) and stored on the source; uploads
+  come from the uploads playlist `"UU" + channelId.slice(2)` (1 unit per channel), 6 requests at a time.
 - localStorage keys: `ft.settings`, `ft.prefs` (rules text, compiled rules, mode, likes, watched, notInterested,
   override, channel affinity), `ft.sources`, `ft.pool` (feed videos, max 600), `ft.labels`, `ft.scores`, `ft.units`
-  (YouTube quota used today, Pacific day).
+  (YouTube quota used today, Pacific day), `ft.categories`, `ft.subsVersion`.
 
 ## Pitfalls already hit (don't repeat)
 
@@ -101,5 +112,7 @@ built output** (`dist/`, bundles, models). Pushing to the branch deploys via the
 - Built output (`docs/`, root `index.html` redirect) was removed from the repo when deployment moved to Actions.
   The user has to set Settings -> Pages -> Source to "GitHub Actions" once; until then the old branch deploy has
   nothing to serve. After switching, re-run the workflow ("Run workflow" in the Actions tab) if no run deployed.
+- Categories + the owner's ~80 subscriptions (pre-sorted; ~13 left unsorted where the channel's subject wasn't
+  clear from its name) + curated technical channel suggestions are in.
 - Ideas not done yet: run topic checks in parallel; check what's on screen first; Gemini suggestions for
-  sources; smarter Up next; scheduled feed refresh.
+  sources; smarter Up next; scheduled feed refresh; per-category topic searches on refresh.

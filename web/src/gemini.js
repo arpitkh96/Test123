@@ -136,6 +136,30 @@ export function createGemini(key, preferredModel = "") {
 
   return {
     get model() { return model; },
+    /** channels: [{id,title,description}], categories: [{id,name}] -> { [channelId]: categoryId | "" } */
+    async categorizeChannels(channels, categories) {
+      const ids = categories.map((c) => c.id);
+      const out = {};
+      for (let i = 0; i < channels.length; i += 60) {
+        const batch = channels.slice(i, i + 60);
+        const prompt = `Assign each YouTube channel to the one category that best fits what it mostly publishes, or "other" if none fits.
+
+Categories:
+${categories.map((c) => `${c.id}: ${c.name}`).join("\n")}
+
+Channels (JSON):
+${JSON.stringify(batch.map((c) => ({ id: c.id, title: c.title, description: (c.description || "").slice(0, 200) })))}
+
+Return one result per channel id.`;
+        const res = await generateJSON(prompt, {
+          type: "OBJECT",
+          properties: { results: { type: "ARRAY", items: { type: "OBJECT", properties: { id: { type: "STRING" }, category: { type: "STRING", enum: [...ids, "other"] } }, required: ["id", "category"] } } },
+          required: ["results"],
+        });
+        for (const r of res.results || []) out[String(r.id)] = ids.includes(r.category) ? r.category : "";
+      }
+      return out;
+    },
     compileRules(text) {
       return generateJSON(`${COMPILE_PROMPT}\n\nThe person's rules:\n"""\n${text.slice(0, 4000)}\n"""`, COMPILE_SCHEMA);
     },

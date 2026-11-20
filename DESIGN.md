@@ -72,6 +72,17 @@ then Claude was removed; then the on-device model was added for topic checks.
 Results are cached per video (`ft.scores` / `ft.labels`), so each video is checked once; applying new rules
 resets on-device scores (cheap to redo). Search results and the open video are checked before the feed.
 
+## 3b. Sources and categories
+
+- Sources start as the owner's YouTube subscriptions (`web/src/subscriptions.js`, parsed once from YouTube's sidebar;
+  the YouTube API can't list subscriptions without OAuth, and the user chose not to have an in-app importer).
+- Every source has one category (Rust, AI, systems, web, software engineering, tech news, science, fitness, finance,
+  mind & spirituality, music, comedy & entertainment, kids; user-editable). The feed has a chip per category in use.
+- A category feed = videos from its channels + videos from any other channel that the on-device model matches to the
+  category's example phrases (so a Rust video from a general programming channel shows under Rust).
+- Suggested technical channels per category can be ticked on the Sources page; unknown handles are flagged on refresh.
+- Unsorted channels can be auto-sorted: Gemini (one request per 60 channels) or, without a key, the on-device model.
+
 ## 4. Front end
 
 - Single page, hash routes: `#feed`, `#search=QUERY`, `#watch=VIDEO_ID`, `#rules`, `#sources`, `#hidden`,

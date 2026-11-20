@@ -1,5 +1,7 @@
 import { DEFAULT_TEXT, DEFAULT_COMPILED, sanitizeCompiled, ruleActive, evaluate, score, similarity, critKey } from "./rules.js";
-import { createYouTube } from "./youtube.js";
+import { createYouTube, pool } from "./youtube.js";
+import { DEFAULT_CATEGORIES, SUGGESTED_CHANNELS } from "./catalog.js";
+import { MY_SUBSCRIPTIONS, SUBSCRIPTIONS_VERSION } from "./subscriptions.js";
 import { createGemini } from "./gemini.js";
 import { scoreVideos, STRICTNESS, setProgressHandler } from "./local-model.js";
 
@@ -7,17 +9,17 @@ import { scoreVideos, STRICTNESS, setProgressHandler } from "./local-model.js";
 const load = (k, d) => { try { const v = JSON.parse(localStorage.getItem(k)); return v ?? d; } catch { return d; } };
 const save = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch { /* storage full or blocked */ } };
 
-const EXAMPLE_SOURCES = [
-  { id: "channel-veritasium", type: "channel", value: "@veritasium", label: "@veritasium", status: "pending", note: "Example source: remove it if you don’t want it." },
-  { id: "channel-fireship", type: "channel", value: "@Fireship", label: "@Fireship", status: "pending", note: "Example source: remove it if you don’t want it." },
-  { id: "topic-rust_programming", type: "topic", value: "rust programming", label: "rust programming", status: "pending", note: "Example source: remove it if you don’t want it." },
-];
+const subscriptionSources = () => MY_SUBSCRIPTIONS.map(([handle, title, category]) => ({ id: "channel-" + critKey(handle), type: "channel", value: handle, label: title, category, status: "pending", note: "", origin: "subscriptions" }));
+const CATEGORY_MATCH = 0.36; // on-device similarity for a video from another channel to count as in a category
 
 const state = {
   route: { view: "feed" },
   settings: { ytKey: "", geminiKey: "", geminiModel: "", refreshHours: 3, topicCheck: "local", strictness: "balanced", ...load("ft.settings", {}) },
   prefs: { rulesText: DEFAULT_TEXT, compiled: DEFAULT_COMPILED, mode: "strict", channels: {}, watched: {}, liked: {}, notInterested: {}, override: {}, ...load("ft.prefs", {}) },
-  sources: load("ft.sources", EXAMPLE_SOURCES),
+  sources: load("ft.sources", null) ?? subscriptionSources(),
+  categories: load("ft.categories", DEFAULT_CATEGORIES),
+  catScores: {},           // categoryId -> { sig, scores: { videoId: similarity } } (on-device, this visit)
+  sorting: { running: false, error: "", note: "" },
   pool: load("ft.pool", { videos: {}, lastRefresh: null }), // feed videos by id
   labels: load("ft.labels", {}),                               // Gemini answers: id -> { critKey: bool }
   scores: load("ft.scores", {}),                               // on-device scores: id -> { critKey: similarity }
@@ -33,6 +35,13 @@ state.prefs.compiled = sanitizeCompiled(state.prefs.compiled);
 // Rules saved before topics had example phrases: fill in the starter examples where they exist.
 for (const [t, ex] of Object.entries(state.prefs.compiled.topics)) if (!ex.length && DEFAULT_COMPILED.topics[t]) state.prefs.compiled.topics[t] = DEFAULT_COMPILED.topics[t];
 for (const v of Object.values(state.pool.videos)) state.known.set(v.id, v);
+// Merge the subscription list into sources once per list version (keeps the person's own edits).
+if (load("ft.subsVersion", 0) < SUBSCRIPTIONS_VERSION) {
+  const have = new Set(state.sources.map((s) => String(s.value).toLowerCase()));
+  for (const s of subscriptionSources()) if (!have.has(s.value.toLowerCase())) state.sources.push(s);
+  save("ft.sources", state.sources);
+  save("ft.subsVersion", SUBSCRIPTIONS_VERSION);
+}
 
 const savePrefs = () => save("ft.prefs", state.prefs);
 const saveLabels = () => {
@@ -43,7 +52,7 @@ const saveLabels = () => {
   }
 };
 function savePool() {
-  const vids = Object.values(state.pool.videos).sort((a, b) => Date.parse(b.publishedAt) - Date.parse(a.publishedAt)).slice(0, 600);
+  const vids = Object.values(state.pool.videos).sort((a, b) => Date.parse(b.publishedAt) - Date.parse(a.publishedAt)).slice(0, 1000);
   state.pool.videos = Object.fromEntries(vids.map((v) => [v.id, v]));
   save("ft.pool", state.pool);
 }
@@ -100,6 +109,7 @@ function parseHash() {
   const h = decodeURIComponent(location.hash.slice(1));
   if (h.startsWith("watch=")) return { view: "watch", id: h.slice(6) };
   if (h.startsWith("search=")) return { view: "search", q: h.slice(7) };
+  if (h.startsWith("cat=")) return { view: "feed", cat: h.slice(4) };
   return { view: ["feed", "rules", "sources", "hidden", "settings"].includes(h) ? h : "feed" };
 }
 function route() {
@@ -117,32 +127,136 @@ $("#searchForm").addEventListener("submit", (e) => {
   if (q) location.hash = "#search=" + encodeURIComponent(q);
 });
 
-/* ---------------- data: feed refresh ---------------- */
+/* ---------------- data: sources, categories, feed refresh ---------------- */
+const saveSources = () => save("ft.sources", state.sources);
+const saveCategories = () => save("ft.categories", state.categories);
+const catById = (id) => state.categories.find((c) => c.id === id);
+/** channelId -> category id, from the sources the user follows */
+function channelCategories() {
+  const m = new Map();
+  for (const s of state.sources) if (s.channelId && s.category) m.set(s.channelId, s.category);
+  return m;
+}
+
+/** Looks up channel ids, names and descriptions for channel sources that don't have them yet. */
+async function resolveChannels(list) {
+  const todo = list.filter((s) => s.type === "channel" && (!s.channelId || s.description === undefined));
+  if (!todo.length || !yt) return;
+  const info = await yt.channelsInfo(todo.map((s) => s.channelId || s.value));
+  for (const s of todo) {
+    const i = info.get(s.channelId || s.value);
+    if (i) Object.assign(s, { channelId: i.channelId, label: i.title, description: i.description, status: s.status === "error" ? "pending" : s.status, note: s.note?.startsWith("YouTube couldn’t") ? "" : s.note });
+    else Object.assign(s, { status: "error", note: "YouTube couldn’t find this channel. Check the handle." });
+  }
+  saveSources();
+}
+
 async function refreshFeed() {
   if (!yt || state.refresh.running) return;
   state.refresh = { running: true, error: "" }; render();
   const found = new Map();
-  for (const s of state.sources) {
-    try {
-      const r = await yt.sourceIds(s);
-      for (const id of r.ids) if (!found.has(id)) found.set(id, { type: s.type, label: r.label });
-      Object.assign(s, { status: "active", note: "", label: s.type === "channel" ? r.label : s.label, channelId: r.channelId });
-    } catch (e) {
-      Object.assign(s, { status: "error", note: e.message });
-      if (e.reason === "quotaExceeded" || e.reason === "keyInvalid") { state.refresh.error = e.message; break; }
+  const stopOn = (e) => { if (e.reason === "quotaExceeded" || e.reason === "keyInvalid") { state.refresh.error = e.message; throw e; } };
+  try {
+    await resolveChannels(state.sources);
+    const channels = state.sources.filter((s) => s.type === "channel" && s.channelId);
+    await pool(channels, 6, async (s) => {
+      try {
+        const ids = await yt.uploads(s.channelId, 10);
+        for (const id of ids) if (!found.has(id)) found.set(id, { type: "channel", label: s.label, sourceId: s.id });
+        Object.assign(s, { status: "active", note: "" });
+      } catch (e) { stopOn(e); Object.assign(s, { status: "error", note: e.message }); }
+    });
+    for (const s of state.sources.filter((x) => x.type !== "channel")) {
+      try {
+        const r = await yt.sourceIds(s);
+        for (const id of r.ids) if (!found.has(id)) found.set(id, { type: s.type, label: r.label, sourceId: s.id });
+        Object.assign(s, { status: "active", note: "" });
+      } catch (e) { stopOn(e); Object.assign(s, { status: "error", note: e.message }); }
     }
-  }
-  save("ft.sources", state.sources);
+  } catch (e) { if (!state.refresh.error) state.refresh.error = e.message; }
+  saveSources();
   try {
     const fresh = [...found.keys()].filter((id) => !state.pool.videos[id]);
     const vids = await yt.details(fresh, (id) => found.get(id));
     for (const v of vids) { state.pool.videos[v.id] = v; state.known.set(v.id, v); }
-    state.pool.lastRefresh = new Date().toISOString();
+    if (found.size) state.pool.lastRefresh = new Date().toISOString();
     savePool();
-  } catch (e) { state.refresh.error = e.message; }
+  } catch (e) { state.refresh.error ||= e.message; }
   state.refresh.running = false;
   render();
 }
+
+/** Adds channels as sources (deduplicated) and sorts the new ones into categories. */
+async function addChannels(list, origin) {
+  const have = new Set(state.sources.flatMap((s) => [String(s.value).toLowerCase(), String(s.channelId || "").toLowerCase()]));
+  const added = [];
+  for (const c of list) {
+    const value = c.value || c.channelId;
+    if (have.has(value.toLowerCase())) continue;
+    have.add(value.toLowerCase());
+    const s = { id: "channel-" + critKey(value), type: "channel", value, label: c.title || value, category: c.category || "", status: "pending", note: "", origin };
+    if (value.startsWith("UC")) s.channelId = value;
+    state.sources.push(s); added.push(s);
+  }
+  saveSources();
+  render();
+  const unsorted = added.filter((s) => !s.category);
+  if (unsorted.length) await sortSources(unsorted);
+  if (added.length) refreshFeed();
+}
+
+/** Puts channels into categories: Gemini if there is a key, else the on-device model on name + description. */
+async function sortSources(list) {
+  if (state.sorting.running || !list.length) return;
+  state.sorting = { running: true, error: "", note: "" }; render();
+  try {
+    await resolveChannels(list);
+    const chans = list.filter((s) => s.type === "channel");
+    let result = {};
+    if (gemini) {
+      result = await gemini.categorizeChannels(chans.map((s) => ({ id: s.id, title: s.label, description: s.description })), state.categories.map((c) => ({ id: c.id, name: c.name })));
+    } else {
+      const topics = Object.fromEntries(state.categories.map((c) => [c.name, c.examples || []]));
+      const scores = await scoreVideos(chans.map((s) => ({ id: s.id, title: s.label, description: s.description || "", tags: [] })), topics);
+      for (const s of chans) {
+        let best = "", bestScore = 0.25;
+        for (const c of state.categories) { const sc = scores[s.id]?.[c.name] ?? -1; if (sc > bestScore) { best = c.id; bestScore = sc; } }
+        result[s.id] = best;
+      }
+    }
+    let n = 0;
+    for (const s of chans) if (s.id in result) { s.category = result[s.id]; s.autoSorted = true; if (s.category) n++; }
+    saveSources();
+    state.sorting.note = `Sorted ${n} of ${chans.length} channels into categories${gemini ? " with Gemini" : " on this device"}. Change any that look wrong.`;
+  } catch (e) { state.sorting.error = "Couldn’t sort channels: " + e.message; }
+  state.sorting.running = false;
+  render();
+}
+
+/** On-device scores of feed videos against the selected category (for videos from other channels). */
+let catScoring = false;
+async function scoreCategory(cat) {
+  if (catScoring || topicMode() === "off") return;
+  const vids = Object.values(state.pool.videos);
+  const sig = (cat.examples || []).join("|") + "#" + vids.length;
+  if (state.catScores[cat.id]?.sig === sig) return;
+  catScoring = true;
+  try {
+    const res = await scoreVideos(vids, { [cat.name]: cat.examples || [] });
+    state.catScores[cat.id] = { sig, scores: Object.fromEntries(vids.map((v) => [v.id, res[v.id]?.[cat.name] ?? -1])) };
+  } catch { state.catScores[cat.id] = { sig, scores: {} }; }
+  catScoring = false;
+  render();
+}
+/** Whether a video belongs to a category: from one of its channels, or a close on-device match. */
+function inCategory(v, cat, chanCats) {
+  if (chanCats.get(v.channelId) === cat.id) return "channel";
+  const src = v.source?.sourceId && state.sources.find((s) => s.id === v.source.sourceId);
+  if (src?.category === cat.id) return "channel";
+  if ((state.catScores[cat.id]?.scores?.[v.id] ?? -1) >= CATEGORY_MATCH) return "topic";
+  return "";
+}
+
 function maybeAutoRefresh() {
   if (!yt || !state.sources.length) return;
   const last = Date.parse(state.pool.lastRefresh || 0);
@@ -257,7 +371,10 @@ async function pump() {
 /* ---------------- rendering ---------------- */
 function videoCard(v, e, opts = {}) {
   const p = state.prefs, why = [];
-  if (v.source?.type === "channel") why.push(`<span>Channel you follow</span>`);
+  const srcCat = catById(channelCategories().get(v.channelId) || "");
+  if (opts.matched) why.push(`<span class="pill allow">Matches ${esc(opts.matched)}</span>`);
+  else if (srcCat) why.push(`<span>${esc(srcCat.name)}</span>`);
+  else if (v.source?.type === "channel") why.push(`<span>Channel you follow</span>`);
   else if (v.source?.type === "topic") why.push(`<span>Topic: ${esc(v.source.label)}</span>`);
   else if (v.source?.type === "trending") why.push(`<span>${esc(v.source.label)}</span>`);
   for (const r of e.boosts) why.push(`<span class="pill ${r.action === "boost" ? "boost" : ""}">${r.action === "boost" ? "Boosted" : "Lowered"}: ${esc(r.text)}</span>`);
@@ -331,16 +448,36 @@ function render() {
   schedulePump();
 }
 
+function categoryChips(active) {
+  const used = new Set(state.sources.map((x) => x.category).filter(Boolean));
+  const cats = state.categories.filter((c) => used.has(c.id));
+  if (!cats.length) return "";
+  return `<nav class="chips" aria-label="Categories"><a class="chipbtn" href="#feed" aria-current="${!active}">All</a>${cats.map((c) => `<a class="chipbtn" href="#cat=${encodeURIComponent(c.id)}" aria-current="${active === c.id}">${esc(c.name)}</a>`).join("")}<a class="chipbtn ghost" href="#sources">Edit</a></nav>`;
+}
+
 function feedView(fd) {
   if (!state.settings.ytKey) return setupCard();
+  const cat = state.route.cat ? catById(state.route.cat) : null;
+  const chips = categoryChips(cat?.id);
   if (!Object.keys(state.pool.videos).length) {
-    return `<div class="empty"><h2>${state.refresh.running ? "Fetching your first videos…" : "No videos yet"}</h2>
-      <p class="lede">Your feed is built from the channels and topics under <a href="#sources">Sources</a>. ${state.sources.length ? "" : "Add a few to get started."}</p>
+    return chips + `<div class="empty"><h2>${state.refresh.running ? "Fetching your first videos…" : "No videos yet"}</h2>
+      <p class="lede">Your feed is built from the channels and topics under <a href="#sources">Sources</a>. ${state.sources.length ? "" : "Add a few channels to get started."}</p>
       ${state.sources.length && !state.refresh.running ? '<button class="btn" data-refresh>Fetch videos now</button>' : ""}</div>`;
   }
-  if (!fd.shown.length) return `<div class="empty"><h2>${fd.pending.length ? "Checking your feed against your rules…" : "Your rules hide everything right now"}</h2><p class="lede">${fd.pending.length ? "Videos appear as they are checked." : "See what was hidden and why under <a href=\"#hidden\">Hidden</a>, or loosen a rule."}</p></div>`;
-  return `<section class="grid" aria-label="Your feed">${fd.shown.map(({ v, e }) => videoCard(v, e)).join("")}</section>
-    ${fd.pending.length ? `<p class="note" style="margin-top:20px">${fd.pending.length} more videos are being checked against your rules.</p>` : ""}`;
+  let shown = fd.shown, pending = fd.pending, head = "";
+  if (cat) {
+    if (!state.catScores[cat.id] && topicMode() !== "off") scoreCategory(cat);
+    const chanCats = channelCategories();
+    shown = fd.shown.filter((x) => (x.why = inCategory(x.v, cat, chanCats)));
+    pending = fd.pending.filter((x) => inCategory(x.v, cat, chanCats));
+    const scoring = topicMode() !== "off" && !state.catScores[cat.id];
+    head = `<div class="row" style="justify-content:space-between;margin-bottom:16px"><h1>${esc(cat.name)}</h1>
+      <span class="row"><span class="note">${scoring ? "Finding matching videos from your other channels…" : `${shown.length} video${shown.length === 1 ? "" : "s"} from your ${esc(cat.name)} channels${topicMode() !== "off" ? " and matching videos from others" : ""}`}</span>
+      <a class="btn ghost" href="#search=${encodeURIComponent(cat.name)}">Search YouTube for more</a></span></div>`;
+  }
+  if (!shown.length) return chips + head + `<div class="empty"><h2>${pending.length ? "Checking these videos against your rules…" : cat ? `Nothing in ${esc(cat.name)} right now` : "Your rules hide everything right now"}</h2><p class="lede">${pending.length ? "Videos appear as they are checked." : cat ? "Add channels to this category under <a href=\"#sources\">Sources</a>, or search YouTube for more." : "See what was hidden and why under <a href=\"#hidden\">Hidden</a>, or loosen a rule."}</p></div>`;
+  return chips + head + `<section class="grid" aria-label="${cat ? esc(cat.name) : "Your feed"}">${shown.map(({ v, e, why }) => videoCard(v, e, { matched: why === "topic" ? cat.name : "" })).join("")}</section>
+    ${pending.length ? `<p class="note" style="margin-top:20px">${pending.length} more videos are being checked against your rules.</p>` : ""}`;
 }
 
 function searchView() {
@@ -451,24 +588,56 @@ function rulesView() {
 
 function sourcesView() {
   const st = { pending: ["Not fetched yet", ""], active: ["Active", "allow"], error: ["Problem", "block"] };
-  const cost = state.sources.reduce((n, s) => n + (s.type === "topic" ? 100 : s.type === "channel" ? 2 : 1), 0);
+  const channels = state.sources.filter((x) => x.type === "channel").length;
+  const cost = channels + state.sources.reduce((n, x) => n + (x.type === "topic" ? 100 : x.type === "trending" ? 1 : 0), 0) + Math.ceil(channels * 10 / 50);
+  const followed = new Set(state.sources.map((x) => String(x.value).toLowerCase()));
+  const catOptions = (sel) => `<option value="">Not sorted</option>${state.categories.map((c) => `<option value="${esc(c.id)}" ${c.id === sel ? "selected" : ""}>${esc(c.name)}</option>`).join("")}`;
+  const row = (x) => {
+    const [lab, cls] = st[x.status] || st.pending;
+    return `<li><span class="pill">${esc(x.type)}</span><span class="grow">${esc(x.label || x.value)}${x.note ? `<br><span class="note ${x.status === "error" ? "err" : ""}">${esc(x.note)}</span>` : ""}</span>
+      <select class="catsel" data-srccat="${esc(x.id)}" aria-label="Category for ${esc(x.label || x.value)}">${catOptions(x.category)}</select>
+      <span class="pill ${cls}">${lab}</span><button class="act" data-delsrc="${esc(x.id)}" aria-label="Remove ${esc(x.label || x.value)}">Remove</button></li>`;
+  };
+  const groups = [...state.categories.map((c) => [c, state.sources.filter((x) => x.category === c.id)]), [{ id: "", name: "Not sorted" }, state.sources.filter((x) => !x.category || !catById(x.category))]].filter(([, l]) => l.length);
+  const unsorted = state.sources.filter((x) => x.type === "channel" && (!x.category || !catById(x.category)));
+  const sugg = state.categories.map((c) => [c, SUGGESTED_CHANNELS.filter(([, , cid]) => cid === c.id)]).filter(([, l]) => l.length);
   return `<div class="col">
-    <div><h1>Sources</h1><p class="lede">YouTube doesn’t let other apps use its personal recommendations, so your feed is built from these: new uploads from channels you follow, recent videos about topics you choose, and trending videos if you want them. Ranking favours fresh videos, channels you like or watch, and anything your rules boost.</p></div>
+    <div><h1>Sources</h1><p class="lede">YouTube doesn’t let other apps use its personal recommendations, so your feed is built from these: new uploads from channels you follow, recent videos about topics you choose, and trending videos if you want them. Your YouTube subscriptions are already here, sorted into categories; open one category at a time from the chips on the feed. Change a channel’s category with its dropdown.</p></div>
+
     <section class="panel">
-      <h2>Add a source</h2>
+      <div class="row" style="justify-content:space-between"><h2>Following (${state.sources.length})</h2>
+        <span class="row">${unsorted.length ? `<button class="btn ghost" data-sort="unsorted" ${state.sorting.running ? "disabled" : ""}>Sort ${unsorted.length} unsorted</button>` : ""}
+        <button class="btn ghost" data-sort="all" ${state.sorting.running || !state.sources.length ? "disabled" : ""}>${state.sorting.running ? "Sorting…" : "Re-sort all"}</button>
+        <button class="btn ghost" data-refresh ${!yt || state.refresh.running ? "disabled" : ""}>${state.refresh.running ? "Fetching…" : "Fetch new videos"}</button></span></div>
+      ${state.sorting.error || state.sorting.note ? `<p class="note ${state.sorting.error ? "err" : "ok"}">${esc(state.sorting.error || state.sorting.note)}</p>` : ""}
+      <p class="note">Each refresh uses about ${cost} of your 10,000 daily YouTube quota units (1 per channel, 100 per topic). FilterTube refreshes on its own every ${state.settings.refreshHours} hours when you open it.</p>
+      ${groups.length ? groups.map(([c, l]) => `<details class="group" ${l.length <= 12 || !c.id ? "open" : ""}><summary><strong>${esc(c.name)}</strong> <span class="count">${l.length}</span>${c.id ? ` <a class="note" href="#cat=${encodeURIComponent(c.id)}">open feed</a>` : ""}</summary><ul class="list">${l.map(row).join("")}</ul></details>`).join("") : '<p class="note">Nothing yet. Pick suggested channels below or add one at the bottom.</p>'}
+    </section>
+
+    <section class="panel">
+      <h2>Suggested technical channels</h2>
+      <p class="note">Well-known channels by category. Tick the ones you want. These handles weren’t checked against YouTube when this list was written; any that YouTube can’t find will show as a problem after the next refresh.</p>
+      <form id="suggForm">${sugg.map(([c, l]) => `<fieldset class="sugg"><legend>${esc(c.name)}</legend>${l.map(([h, name]) => {
+        const has = followed.has(h.toLowerCase());
+        return `<label class="check"><input type="checkbox" name="sugg" value="${esc(h)}" data-name="${esc(name)}" data-cat="${esc(c.id)}" ${has ? "checked disabled" : ""}> ${esc(name)} <span class="note">${esc(h)}${has ? " · following" : ""}</span></label>`;
+      }).join("")}</fieldset>`).join("")}
+      <div class="row"><button class="btn" type="submit" ${!yt ? "disabled" : ""}>Add selected</button></div></form>
+    </section>
+
+    <section class="panel">
+      <h2>Categories</h2>
+      <p class="note">The example phrases help the on-device model find videos for a category from channels outside it.</p>
+      <ul class="list">${state.categories.map((c) => `<li><span class="grow"><strong>${esc(c.name)}</strong><br><span class="note">${esc((c.examples || []).join(" · ") || "No example phrases")}</span></span><span class="count">${state.sources.filter((x) => x.category === c.id).length}</span><button class="act" data-delcat="${esc(c.id)}">Delete</button></li>`).join("")}</ul>
+      <form class="addform" id="catForm"><input id="catName" placeholder="New category, e.g. Databases" aria-label="Category name" required><input id="catExamples" placeholder="Example video titles, comma separated" aria-label="Example phrases"><button class="btn" type="submit">Add</button></form>
+    </section>
+
+    <section class="panel">
+      <h2>Add a single source</h2>
       <form class="addform" id="addForm">
         <select id="srcType" aria-label="Source type"><option value="channel">Channel</option><option value="topic">Topic</option><option value="trending">Trending in region</option></select>
         <input id="srcValue" placeholder="@handle or channel link" aria-label="Channel, topic or region" required>
         <button class="btn" type="submit">Add</button>
       </form>
-      <div class="row"><button class="btn ghost" data-refresh ${!yt || state.refresh.running ? "disabled" : ""}>${state.refresh.running ? "Fetching…" : "Fetch new videos now"}</button>
-      <span class="note">Each refresh uses about ${cost} of your 10,000 daily YouTube quota units (topics cost 100 each). FilterTube refreshes on its own every ${state.settings.refreshHours} hours when you open it.</span></div>
-    </section>
-    <section class="panel"><h2>Following</h2>
-      ${state.sources.length ? `<ul class="list">${state.sources.map((s) => {
-        const [lab, cls] = st[s.status] || st.pending;
-        return `<li><span class="pill">${esc(s.type)}</span><span class="grow">${esc(s.label || s.value)}${s.note ? `<br><span class="note">${esc(s.note)}</span>` : ""}</span><span class="pill ${cls}">${lab}</span><button class="act" data-delsrc="${esc(s.id)}" aria-label="Remove ${esc(s.label || s.value)}">Remove</button></li>`;
-      }).join("")}</ul>` : '<p class="note">Nothing yet. Add a few channels you trust and a couple of topics.</p>'}
     </section></div>`;
 }
 
@@ -514,7 +683,7 @@ function settingsView() {
 
 /* ---------------- interactions ---------------- */
 document.addEventListener("click", (e) => {
-  const t = e.target.closest("[data-like],[data-nope],[data-override],[data-undo],[data-delsrc],[data-mode],[data-compile],[data-refresh],[data-resume],[data-more],[data-toggle-hidden],[data-clear]");
+  const t = e.target.closest("[data-like],[data-nope],[data-override],[data-undo],[data-delsrc],[data-mode],[data-compile],[data-refresh],[data-resume],[data-more],[data-toggle-hidden],[data-clear],[data-sort],[data-delcat]");
   if (!t) return;
   const p = state.prefs, d = t.dataset;
   if (d.like) { const v = state.known.get(d.like); if (p.liked[d.like]) { delete p.liked[d.like]; bumpChannel(v, -1.5); } else { p.liked[d.like] = true; bumpChannel(v, 1.5); } savePrefs(); }
@@ -522,7 +691,9 @@ document.addEventListener("click", (e) => {
   else if (d.override) { p.override[d.override] = true; savePrefs(); }
   else if (d.undo) { delete p.notInterested[d.undo]; bumpChannel(state.known.get(d.undo), 2); savePrefs(); }
   else if (d.mode) { p.mode = d.mode; savePrefs(); }
-  else if (d.delsrc) { state.sources = state.sources.filter((s) => s.id !== d.delsrc); save("ft.sources", state.sources); }
+  else if (d.delsrc) { state.sources = state.sources.filter((s) => s.id !== d.delsrc); saveSources(); }
+  else if (d.sort) { sortSources(state.sources.filter((s) => s.type === "channel" && (d.sort === "all" || !s.category || !catById(s.category)))); return; }
+  else if (d.delcat) { state.categories = state.categories.filter((c) => c.id !== d.delcat); for (const s of state.sources) if (s.category === d.delcat) s.category = ""; saveCategories(); saveSources(); }
   else if ("compile" in d) { compileRules(); return; }
   else if ("refresh" in d) { refreshFeed(); return; }
   else if ("resume" in d) { state.classify.error = ""; }
@@ -531,11 +702,35 @@ document.addEventListener("click", (e) => {
   else if ("clear" in d) { state.pool = { videos: {}, lastRefresh: null }; state.labels = {}; state.scores = {}; save("ft.pool", state.pool); save("ft.labels", {}); save("ft.scores", {}); }
   render();
 });
+document.addEventListener("change", (e) => {
+  const t = e.target;
+  if (t.dataset?.srccat) {
+    const s = state.sources.find((x) => x.id === t.dataset.srccat);
+    if (s) { s.category = t.value; s.autoSorted = false; saveSources(); t.blur(); render(); }
+  }
+});
 document.addEventListener("input", (e) => {
   if (e.target.id === "rulesText") { state.prefs.rulesText = e.target.value; savePrefs(); }
   if (e.target.id === "srcType") $("#srcValue").placeholder = { channel: "@handle or channel link", topic: "e.g. woodworking, rust programming", trending: "Country code, e.g. US, IN, GB" }[e.target.value];
 });
 document.addEventListener("submit", (e) => {
+  if (e.target.id === "suggForm") {
+    e.preventDefault();
+    const picks = [...e.target.querySelectorAll('input[name="sugg"]:checked:not(:disabled)')].map((i) => ({ value: i.value, title: i.dataset.name, category: i.dataset.cat }));
+    if (picks.length) addChannels(picks, "suggested");
+    return;
+  }
+  if (e.target.id === "catForm") {
+    e.preventDefault();
+    const name = $("#catName").value.trim();
+    if (!name) return;
+    const id = critKey(name);
+    if (!catById(id)) state.categories.push({ id, name, examples: $("#catExamples").value.split(",").map((x) => x.trim()).filter(Boolean).slice(0, 10) });
+    saveCategories();
+    document.activeElement?.blur();
+    render();
+    return;
+  }
   if (e.target.id === "addForm") {
     e.preventDefault();
     const type = $("#srcType").value;
@@ -548,8 +743,9 @@ document.addEventListener("submit", (e) => {
     }
     if (type === "trending") v = v.toUpperCase().slice(0, 2);
     const id = type + "-" + critKey(v);
-    if (!state.sources.some((s) => s.id === id)) state.sources.push({ id, type, value: v, label: v, status: "pending", note: "" });
-    save("ft.sources", state.sources);
+    if (type === "channel") { $("#srcValue").value = ""; addChannels([{ value: v, title: v }], "manual"); return; }
+    if (!state.sources.some((s) => s.id === id)) state.sources.push({ id, type, value: v, label: v, category: "", status: "pending", note: "" });
+    saveSources();
     $("#srcValue").value = "";
     $("#srcValue").blur();
     render();
