@@ -25,10 +25,14 @@ const VIDS = {
   v3: ["Celebrity breakup drama EXPOSED", "Gossip Daily", 600, "celebrity drama gossip", 24],
   v4: ["How black holes evaporate", "Science Hour", 900, "physics space", 27],
   v5: ["4 hour podcast marathon", "Talks", 4 * 3600, "podcast", 22],
+  // Course lectures (old uploads)
+  c1: ["Lecture 1 - Introduction to Machine Learning", "Stanford Online", 4500, "stanford cs229 lecture", 27, 24 * 900],
+  c2: ["Lecture 2 - Linear Regression and Gradient Descent", "Stanford Online", 4600, "stanford cs229 lecture", 27, 24 * 900],
+  c3: ["Lecture 3 - Logistic Regression", "Stanford Online", 4700, "stanford cs229 lecture", 27, 24 * 899],
 };
 const item = (id) => {
-  const [t, c, d, desc, cat] = VIDS[id];
-  return { id, snippet: { title: t, channelTitle: c, channelId: "ch-" + c, publishedAt: iso(5), description: desc, categoryId: String(cat), liveBroadcastContent: "none", thumbnails: { medium: { url: "https://i.ytimg.com/vi/x/mq.jpg" } } },
+  const [t, c, d, desc, cat, ageH = 5] = VIDS[id];
+  return { id, snippet: { title: t, channelTitle: c, channelId: "ch-" + c, publishedAt: iso(ageH), description: desc, categoryId: String(cat), liveBroadcastContent: "none", thumbnails: { medium: { url: "https://i.ytimg.com/vi/x/mq.jpg" } } },
     contentDetails: { duration: `PT${Math.floor(d / 3600)}H${Math.floor((d % 3600) / 60)}M${d % 60}S` }, statistics: { viewCount: "12345" } };
 };
 const json = (r, body) => r.fulfill({ status: 200, contentType: "application/json", headers: { "access-control-allow-origin": "*" }, body: JSON.stringify(body) });
@@ -55,10 +59,16 @@ const calls = { keys: new Set(), geminiTopic: 0, compile: 0, anthropic: 0 };
     }
     if (ep === "playlistItems") {
       const pl = u.searchParams.get("playlistId");
+      if (pl.startsWith("PL")) return json(r, { items: (pl.includes("CS229") ? ["c1", "c2", "c3"] : []).map((videoId) => ({ contentDetails: { videoId } })) });
       const uploads = { harkirat1: ["v1"], Computerphile: ["v4"], tseries: ["v2"] };
       const key = Object.keys(uploads).find((k) => pl === "UU" + ("@" + k).replace(/\W/g, "").padEnd(22, "x").slice(0, 22));
       calls.uploadCalls = (calls.uploadCalls || 0) + 1;
       return json(r, { items: (uploads[key] || []).map((videoId) => ({ contentDetails: { videoId } })) });
+    }
+    if (ep === "search" && u.searchParams.get("type") === "playlist") {
+      calls.playlistSearches = (calls.playlistSearches || 0) + 1;
+      const q = u.searchParams.get("q");
+      return json(r, { items: [{ id: { playlistId: "PL" + q.replace(/\W/g, "").slice(0, 30) }, snippet: { title: q, channelTitle: "Stanford Online" } }] });
     }
     if (ep === "search") return json(r, { items: ["v3", "v4", "v5"].map((id) => ({ id: { videoId: id } })), pageInfo: { totalResults: 3 } });
     if (ep === "videos") return json(r, { items: (u.searchParams.get("id") || "").split(",").filter((id) => VIDS[id]).map(item) });
@@ -141,10 +151,24 @@ const calls = { keys: new Set(), geminiTopic: 0, compile: 0, anthropic: 0 };
 
   // Add a suggested Rust channel; Rust chip appears and picks up the Rust video from another channel
   await pg.goto(BASE + "#sources"); await pg.waitForTimeout(300);
-  check("subscriptions listed on Sources", /Following \((8\d)\)/.test(await pg.textContent("main")));
+  check("subscriptions listed on Sources", /Following \((9\d)\)/.test(await pg.textContent("main")));
   await pg.check('input[name="sugg"][value="@jonhoo"]');
   await pg.click('#suggForm button[type="submit"]');
   await pg.waitForTimeout(1500);
+  // AI courses: found once by search, lectures listed in order in the AI category, kept out of the main feed
+  check("one playlist search per course", calls.playlistSearches === 8, String(calls.playlistSearches));
+  await pg.goto(BASE + "#feed"); await pg.waitForTimeout(300);
+  await pg.click("#strip [data-refresh]"); await pg.waitForTimeout(1500);
+  check("refresh reuses found playlists (no new searches)", calls.playlistSearches === 8, String(calls.playlistSearches));
+  check("lectures not in the main feed", !(await pg.$$eval(".grid .card .title", (e) => e.map((x) => x.textContent))).some((t) => t.startsWith("Lecture")));
+  await pg.goto(BASE + "#cat=ai"); await pg.waitForTimeout(500);
+  const course = await pg.$$eval("details.course", (e) => e.map((d) => d.querySelector("summary strong").textContent + ": " + [...d.querySelectorAll(".lectures .title")].map((t) => t.textContent).join(" / ")));
+  check("AI category lists course lectures in order", course.some((c) => c === "Stanford CS229: Machine Learning: Lecture 1 - Introduction to Machine Learning / Lecture 2 - Linear Regression and Gradient Descent / Lecture 3 - Logistic Regression"), JSON.stringify(course.slice(0, 2)));
+  await pg.click('details.course:has-text("CS229") a.btn');
+  await pg.waitForTimeout(600);
+  const upnext = await pg.$$eval("#upnext .mini-card .title", (e) => e.map((x) => x.textContent));
+  check("Up next continues the course in order", upnext[0] === "Lecture 2 - Linear Regression and Gradient Descent" && upnext[1] === "Lecture 3 - Logistic Regression", JSON.stringify(upnext.slice(0, 3)));
+
   // Comma-separated channels: duplicates (already following @jonhoo) are skipped
   await pg.goto(BASE + "#sources"); await pg.waitForTimeout(300);
   const before = +(await pg.textContent("main")).match(/Following \((\d+)\)/)[1];

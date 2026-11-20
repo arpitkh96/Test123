@@ -2,7 +2,7 @@
 // An empty category means "not sorted yet": the Sources page can sort those automatically.
 // Bump SUBSCRIPTIONS_VERSION after editing so browsers that already have FilterTube data merge in new entries.
 
-export const SUBSCRIPTIONS_VERSION = 1;
+export const SUBSCRIPTIONS_VERSION = 2;
 
 /** [handle, channel name, category id] */
 export const MY_SUBSCRIPTIONS = [
@@ -21,6 +21,7 @@ export const MY_SUBSCRIPTIONS = [
   ["@hugolarochelle", "Hugo Larochelle", "ai"],
   ["@machinelearner9003", "MachineLearner", "ai"],
   ["@analyticsdiksha7024", "Analytics Diksha", "ai"],
+  ["@AndrejKarpathy", "Andrej Karpathy", "ai"],
   ["@The-Rest-of-Us", "The Rest Of Us", ""],
   ["@LinusTechTips", "Linus Tech Tips", "technews"],
 
@@ -97,4 +98,20 @@ export const MY_SUBSCRIPTIONS = [
   ["@MaxsMonthlyChallenge", "Max's Monthly Challenge", ""],
   ["@UMEDIA1", "U MEDIA", ""],
   ["@fdkresearch9032", "FDK Research", ""],
+];
+
+/**
+ * AI course playlists, as search phrases. On the first refresh FilterTube searches YouTube once for each
+ * (100 quota units) and remembers the playlist it found; the Sources page shows which one, and a pasted
+ * playlist link replaces it. [search phrase, short name, category id]
+ */
+export const MY_COURSES = [
+  ["Stanford CS229 Machine Learning Andrew Ng full course", "Stanford CS229: Machine Learning", "ai"],
+  ["Stanford CS224N Natural Language Processing with Deep Learning", "Stanford CS224N: NLP with Deep Learning", "ai"],
+  ["Stanford CS231N Convolutional Neural Networks for Visual Recognition", "Stanford CS231N: Deep Learning for Computer Vision", "ai"],
+  ["Stanford CS25 Transformers United", "Stanford CS25: Transformers United", "ai"],
+  ["MIT 6.S191 Introduction to Deep Learning", "MIT 6.S191: Introduction to Deep Learning", "ai"],
+  ["UC Berkeley CS285 Deep Reinforcement Learning Sergey Levine", "Berkeley CS285: Deep Reinforcement Learning", "ai"],
+  ["CMU 11-785 Introduction to Deep Learning", "CMU 11-785: Introduction to Deep Learning", "ai"],
+  ["Andrej Karpathy Neural Networks: Zero to Hero", "Karpathy: Neural Networks, Zero to Hero", "ai"],
 ];

@@ -154,6 +154,17 @@ fieldset.sugg { border: 1px solid var(--line); border-radius: 8px; padding: 8px 
 fieldset.sugg legend { font-weight: 700; padding: 0 4px; }
 label.check { display: inline-flex; gap: 6px; align-items: center; }
 @media (max-width: 560px) { .list li { flex-wrap: wrap; } .catsel { max-width: 100%; } }
+
+/* Courses in a category */
+.courses { margin-bottom: 24px; gap: 0; }
+.courses h2 { margin-bottom: 6px; }
+details.course { border-top: 1px solid var(--line); padding: 10px 0; }
+details.course:first-of-type { border-top: 0; }
+details.course > summary { cursor: pointer; display: flex; gap: 12px; align-items: center; list-style: none; }
+details.course > summary::-webkit-details-marker { display: none; }
+details.course > summary .grow { flex: 1; min-width: 0; }
+.lectures { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(240px, 300px); gap: 14px; overflow-x: auto; padding: 12px 2px 6px; }
+.lectures .mini-card { grid-template-columns: 1fr; }
 </style>
 </head>
 <body>

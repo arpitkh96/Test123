@@ -80,6 +80,9 @@ resets on-device scores (cheap to redo). Search results and the open video are c
   mind & spirituality, music, comedy & entertainment, kids; user-editable). The feed has a chip per category in use.
 - A category feed = videos from its channels + videos from any other channel that the on-device model matches to the
   category's example phrases (so a Rust video from a general programming channel shows under Rust).
+- AI course playlists from universities (and Karpathy's channel + Zero to Hero series) live in the AI category: a
+  "Courses" section lists each course's lectures in order with Start / Continue, separate from the date-ranked feed.
+  Courses are configured as search phrases and resolved to a playlist once, so no playlist IDs are hard-coded.
 - Suggested technical channels per category can be ticked on the Sources page; unknown handles are flagged on refresh.
 - Unsorted channels can be auto-sorted: Gemini (one request per 60 channels) or, without a key, the on-device model.
 

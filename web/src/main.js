@@ -1,7 +1,7 @@
 import { DEFAULT_TEXT, DEFAULT_COMPILED, sanitizeCompiled, ruleActive, evaluate, score, similarity, critKey } from "./rules.js";
 import { createYouTube, pool } from "./youtube.js";
 import { DEFAULT_CATEGORIES, SUGGESTED_CHANNELS } from "./catalog.js";
-import { MY_SUBSCRIPTIONS, SUBSCRIPTIONS_VERSION } from "./subscriptions.js";
+import { MY_SUBSCRIPTIONS, MY_COURSES, SUBSCRIPTIONS_VERSION } from "./subscriptions.js";
 import { createGemini } from "./gemini.js";
 import { scoreVideos, STRICTNESS, setProgressHandler } from "./local-model.js";
 
@@ -9,7 +9,8 @@ import { scoreVideos, STRICTNESS, setProgressHandler } from "./local-model.js";
 const load = (k, d) => { try { const v = JSON.parse(localStorage.getItem(k)); return v ?? d; } catch { return d; } };
 const save = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch { /* storage full or blocked */ } };
 
-const subscriptionSources = () => MY_SUBSCRIPTIONS.map(([handle, title, category]) => ({ id: "channel-" + critKey(handle), type: "channel", value: handle, label: title, category, status: "pending", note: "", origin: "subscriptions" }));
+const courseSources = () => MY_COURSES.map(([query, label, category]) => ({ id: "playlist-" + critKey(query), type: "playlist", value: query, label, category, status: "pending", note: "", origin: "subscriptions" }));
+const subscriptionSources = () => [...courseSources(), ...MY_SUBSCRIPTIONS.map(([handle, title, category]) => ({ id: "channel-" + critKey(handle), type: "channel", value: handle, label: title, category, status: "pending", note: "", origin: "subscriptions" }))];
 const CATEGORY_MATCH = 0.36; // on-device similarity for a video from another channel to count as in a category
 
 const state = {
@@ -52,7 +53,10 @@ const saveLabels = () => {
   }
 };
 function savePool() {
-  const vids = Object.values(state.pool.videos).sort((a, b) => Date.parse(b.publishedAt) - Date.parse(a.publishedAt)).slice(0, 1000);
+  // Course lectures are old by nature, so they are kept apart from the newest-1000 cut (up to 600 of them).
+  const all = Object.values(state.pool.videos).sort((a, b) => Date.parse(b.publishedAt) - Date.parse(a.publishedAt));
+  const isCourse = (v) => v.source?.type === "playlist";
+  const vids = [...all.filter((v) => !isCourse(v)).slice(0, 1000), ...all.filter(isCourse).slice(0, 600)];
   state.pool.videos = Object.fromEntries(vids.map((v) => [v.id, v]));
   save("ft.pool", state.pool);
 }
@@ -158,6 +162,19 @@ async function refreshFeed() {
   const stopOn = (e) => { if (e.reason === "quotaExceeded" || e.reason === "keyInvalid") { state.refresh.error = e.message; throw e; } };
   try {
     await resolveChannels(state.sources);
+    // Course playlists first, so a lecture that is also a recent channel upload stays tied to its course.
+    for (const s of state.sources.filter((x) => x.type === "playlist")) {
+      try {
+        if (!s.playlistId) {
+          const direct = String(s.value).match(/(?:list=)?((?:PL|UU|OL|FL)[\w-]{10,})/);
+          if (direct) { const p = await yt.playlistInfo(direct[1]); Object.assign(s, { playlistId: direct[1], foundTitle: p?.title, foundChannel: p?.channel, label: (s.label === s.value || s.label === "Course playlist") && p?.title ? p.title : s.label }); }
+          else { const p = await yt.findPlaylist(s.value); Object.assign(s, { playlistId: p.playlistId, foundTitle: p.title, foundChannel: p.channel }); }
+        }
+        const ids = await yt.playlistVideos(s.playlistId, 50);
+        ids.forEach((id, i) => { if (!found.has(id)) found.set(id, { type: "playlist", label: s.label, sourceId: s.id, position: i }); });
+        Object.assign(s, { status: "active", note: "", lectures: ids.length });
+      } catch (e) { stopOn(e); Object.assign(s, { status: "error", note: e.message }); }
+    }
     const channels = state.sources.filter((s) => s.type === "channel" && s.channelId);
     await pool(channels, 6, async (s) => {
       try {
@@ -166,7 +183,7 @@ async function refreshFeed() {
         Object.assign(s, { status: "active", note: "" });
       } catch (e) { stopOn(e); Object.assign(s, { status: "error", note: e.message }); }
     });
-    for (const s of state.sources.filter((x) => x.type !== "channel")) {
+    for (const s of state.sources.filter((x) => x.type === "topic" || x.type === "trending")) {
       try {
         const r = await yt.sourceIds(s);
         for (const id of r.ids) if (!found.has(id)) found.set(id, { type: s.type, label: r.label, sourceId: s.id });
@@ -381,7 +398,8 @@ async function pump() {
 function videoCard(v, e, opts = {}) {
   const p = state.prefs, why = [];
   const srcCat = catById(channelCategories().get(v.channelId) || "");
-  if (opts.matched) why.push(`<span class="pill allow">Matches ${esc(opts.matched)}</span>`);
+  if (v.source?.type === "playlist") why.push(`<span>Course: ${esc(v.source.label)}</span>`);
+  else if (opts.matched) why.push(`<span class="pill allow">Matches ${esc(opts.matched)}</span>`);
   else if (srcCat) why.push(`<span>${esc(srcCat.name)}</span>`);
   else if (v.source?.type === "channel") why.push(`<span>Channel you follow</span>`);
   else if (v.source?.type === "topic") why.push(`<span>Topic: ${esc(v.source.label)}</span>`);
@@ -464,6 +482,23 @@ function categoryChips(active) {
   return `<nav class="chips" aria-label="Categories"><a class="chipbtn" href="#feed" aria-current="${!active}">All</a>${cats.map((c) => `<a class="chipbtn" href="#cat=${encodeURIComponent(c.id)}" aria-current="${active === c.id}">${esc(c.name)}</a>`).join("")}<a class="chipbtn ghost" href="#sources">Edit</a></nav>`;
 }
 
+/** Course playlists in a category, each with its lectures in order (rules still apply). */
+function coursesSection(cat) {
+  const list = state.sources.filter((s) => s.type === "playlist" && s.category === cat.id);
+  if (!list.length) return "";
+  const vids = Object.values(state.pool.videos);
+  const blocks = list.map((s) => {
+    const lectures = vids.filter((v) => v.source?.sourceId === s.id).sort((a, b) => (a.source.position ?? 0) - (b.source.position ?? 0));
+    const ok = lectures.map((v) => ({ v, e: ev(v) })).filter((x) => x.e.status === "show");
+    const next = ok.find((x) => !state.prefs.watched[x.v.id]) || ok[0];
+    const watched = ok.filter((x) => state.prefs.watched[x.v.id]).length;
+    return `<details class="course"><summary><span class="grow"><strong>${esc(s.label)}</strong><br><span class="note">${s.status === "error" ? esc(s.note) : lectures.length ? `${ok.length} lectures${watched ? ` · ${watched} watched` : ""}${s.foundChannel ? ` · ${esc(s.foundChannel)}` : ""}` : "Lectures load on the next refresh"}</span></span>
+      ${next ? `<a class="btn ghost" href="${watchHref(next.v.id)}">${watched ? "Continue" : "Start"}</a>` : ""}</summary>
+      <div class="lectures">${ok.map(({ v, e }) => videoCard(v, e, { mini: true })).join("")}</div></details>`;
+  }).join("");
+  return `<section class="panel courses" aria-label="Courses"><h2>Courses</h2>${blocks}</section>`;
+}
+
 function feedView(fd) {
   if (!state.settings.ytKey) return setupCard();
   const cat = state.route.cat ? catById(state.route.cat) : null;
@@ -473,19 +508,21 @@ function feedView(fd) {
       <p class="lede">Your feed is built from the channels and topics under <a href="#sources">Sources</a>. ${state.sources.length ? "" : "Add a few channels to get started."}</p>
       ${state.sources.length && !state.refresh.running ? '<button class="btn" data-refresh>Fetch videos now</button>' : ""}</div>`;
   }
-  let shown = fd.shown, pending = fd.pending, head = "";
+  const notCourse = (x) => x.v.source?.type !== "playlist";
+  let shown = fd.shown.filter(notCourse), pending = fd.pending.filter(notCourse), head = "", courses = "";
   if (cat) {
     if (!state.catScores[cat.id] && topicMode() !== "off") scoreCategory(cat);
     const chanCats = channelCategories();
-    shown = fd.shown.filter((x) => (x.why = inCategory(x.v, cat, chanCats)));
-    pending = fd.pending.filter((x) => inCategory(x.v, cat, chanCats));
+    shown = shown.filter((x) => (x.why = inCategory(x.v, cat, chanCats)));
+    pending = pending.filter((x) => inCategory(x.v, cat, chanCats));
+    courses = coursesSection(cat);
     const scoring = topicMode() !== "off" && !state.catScores[cat.id];
     head = `<div class="row" style="justify-content:space-between;margin-bottom:16px"><h1>${esc(cat.name)}</h1>
       <span class="row"><span class="note">${scoring ? "Finding matching videos from your other channels…" : `${shown.length} video${shown.length === 1 ? "" : "s"} from your ${esc(cat.name)} channels${topicMode() !== "off" ? " and matching videos from others" : ""}`}</span>
       <a class="btn ghost" href="#search=${encodeURIComponent(cat.name)}">Search YouTube for more</a></span></div>`;
   }
-  if (!shown.length) return chips + head + `<div class="empty"><h2>${pending.length ? "Checking these videos against your rules…" : cat ? `Nothing in ${esc(cat.name)} right now` : "Your rules hide everything right now"}</h2><p class="lede">${pending.length ? "Videos appear as they are checked." : cat ? "Add channels to this category under <a href=\"#sources\">Sources</a>, or search YouTube for more." : "See what was hidden and why under <a href=\"#hidden\">Hidden</a>, or loosen a rule."}</p></div>`;
-  return chips + head + `<section class="grid" aria-label="${cat ? esc(cat.name) : "Your feed"}">${shown.map(({ v, e, why }) => videoCard(v, e, { matched: why === "topic" ? cat.name : "" })).join("")}</section>
+  if (!shown.length) return chips + head + courses + `<div class="empty"><h2>${pending.length ? "Checking these videos against your rules…" : cat ? `Nothing in ${esc(cat.name)} right now` : "Your rules hide everything right now"}</h2><p class="lede">${pending.length ? "Videos appear as they are checked." : cat ? "Add channels to this category under <a href=\"#sources\">Sources</a>, or search YouTube for more." : "See what was hidden and why under <a href=\"#hidden\">Hidden</a>, or loosen a rule."}</p></div>`;
+  return chips + head + courses + `${courses ? `<h2 style="margin:8px 0 14px">Latest videos</h2>` : ""}<section class="grid" aria-label="${cat ? esc(cat.name) : "Your feed"}">${shown.map(({ v, e, why }) => videoCard(v, e, { matched: why === "topic" ? cat.name : "" })).join("")}</section>
     ${pending.length ? `<p class="note" style="margin-top:20px">${pending.length} more videos are being checked against your rules.</p>` : ""}`;
 }
 
@@ -536,6 +573,12 @@ function renderWatch(m) {
     ${v.description ? `<div class="wdesc">${esc(v.description)}</div>` : ""}` : "";
   const cands = [...state.known.values()].filter((x) => x.id !== id).map((x) => ({ v: x, e: ev(x) })).filter((x) => x.e.status === "show");
   if (v) cands.sort((a, b) => similarity(v, b.v) + score(b.v, b.e, p) * 0.3 - (similarity(v, a.v) + score(a.v, a.e, p) * 0.3));
+  if (v?.source?.type === "playlist") {
+    // In a course, the following lectures come first, in order.
+    const pos = v.source.position ?? 0, sid = v.source.sourceId;
+    const nextLectures = cands.filter((x) => x.v.source?.sourceId === sid && (x.v.source.position ?? 0) > pos).sort((a, b) => a.v.source.position - b.v.source.position);
+    cands.splice(0, cands.length, ...nextLectures, ...cands.filter((x) => !nextLectures.includes(x)));
+  }
   $("#upnext").innerHTML = `<h2>Up next</h2>${cands.length ? cands.slice(0, 20).map(({ v: x, e: ex }) => videoCard(x, ex, { mini: true })).join("") : '<p class="note">Videos from your feed and searches that pass your rules show up here.</p>'}`;
 }
 
@@ -598,12 +641,13 @@ function rulesView() {
 function sourcesView() {
   const st = { pending: ["Not fetched yet", ""], active: ["Active", "allow"], error: ["Problem", "block"] };
   const channels = state.sources.filter((x) => x.type === "channel").length;
-  const cost = channels + state.sources.reduce((n, x) => n + (x.type === "topic" ? 100 : x.type === "trending" ? 1 : 0), 0) + Math.ceil(channels * 10 / 50);
+  const cost = channels + state.sources.reduce((n, x) => n + (x.type === "topic" ? 100 : x.type === "trending" ? 1 : x.type === "playlist" ? 2 : 0), 0) + Math.ceil(channels * 10 / 50);
   const followed = new Set(state.sources.map((x) => String(x.value).toLowerCase()));
   const catOptions = (sel) => `<option value="">Not sorted</option>${state.categories.map((c) => `<option value="${esc(c.id)}" ${c.id === sel ? "selected" : ""}>${esc(c.name)}</option>`).join("")}`;
   const row = (x) => {
     const [lab, cls] = st[x.status] || st.pending;
-    return `<li><span class="pill">${esc(x.type)}</span><span class="grow">${esc(x.label || x.value)}${x.note ? `<br><span class="note ${x.status === "error" ? "err" : ""}">${esc(x.note)}</span>` : ""}</span>
+    const found = x.type === "playlist" && x.foundTitle ? `<br><span class="note">Found: “${esc(x.foundTitle)}”${x.foundChannel ? ` by ${esc(x.foundChannel)}` : ""}${x.lectures ? `, ${x.lectures} videos` : ""}. Wrong one? Remove it and add the playlist link.</span>` : "";
+    return `<li><span class="pill">${esc(x.type === "playlist" ? "course" : x.type)}</span><span class="grow">${esc(x.label || x.value)}${found}${x.note ? `<br><span class="note ${x.status === "error" ? "err" : ""}">${esc(x.note)}</span>` : ""}</span>
       <select class="catsel" data-srccat="${esc(x.id)}" aria-label="Category for ${esc(x.label || x.value)}">${catOptions(x.category)}</select>
       <span class="pill ${cls}">${lab}</span><button class="act" data-delsrc="${esc(x.id)}" aria-label="Remove ${esc(x.label || x.value)}">Remove</button></li>`;
   };
@@ -643,11 +687,11 @@ function sourcesView() {
     <section class="panel">
       <h2>Add channels or a topic</h2>
       <form class="addform" id="addForm">
-        <select id="srcType" aria-label="Source type"><option value="channel">Channels</option><option value="topic">Topic</option><option value="trending">Trending in region</option></select>
+        <select id="srcType" aria-label="Source type"><option value="channel">Channels</option><option value="playlist">Course playlist</option><option value="topic">Topic</option><option value="trending">Trending in region</option></select>
         <input id="srcValue" placeholder="@handle, @another, channel links… (comma separated)" aria-label="Channels, topic or region" required>
         <button class="btn" type="submit">Add</button>
       </form>
-      <p class="note">For channels, paste one or many, separated by commas: <code>@Fireship, @jonhoo, youtube.com/@ByteByteGo</code>. Channels you already follow are skipped, and new ones are sorted into categories automatically.</p>
+      <p class="note">For channels, paste one or many, separated by commas: <code>@Fireship, @jonhoo, youtube.com/@ByteByteGo</code>. Channels you already follow are skipped, and new ones are sorted into categories automatically. For a course, paste the playlist link (or a course name to search for), then pick its category in the list above.</p>
     </section></div>`;
 }
 
@@ -721,7 +765,7 @@ document.addEventListener("change", (e) => {
 });
 document.addEventListener("input", (e) => {
   if (e.target.id === "rulesText") { state.prefs.rulesText = e.target.value; savePrefs(); }
-  if (e.target.id === "srcType") $("#srcValue").placeholder = { channel: "@handle or channel link", topic: "e.g. woodworking, rust programming", trending: "Country code, e.g. US, IN, GB" }[e.target.value];
+  if (e.target.id === "srcType") $("#srcValue").placeholder = { channel: "@handle, @another, channel links… (comma separated)", playlist: "Playlist link (…list=PL…) or a course name to search for", topic: "e.g. woodworking, rust programming", trending: "Country code, e.g. US, IN, GB" }[e.target.value];
 });
 document.addEventListener("submit", (e) => {
   if (e.target.id === "suggForm") {
@@ -754,7 +798,7 @@ document.addEventListener("submit", (e) => {
     }
     if (type === "trending") v = v.toUpperCase().slice(0, 2);
     const id = type + "-" + critKey(v);
-    if (!state.sources.some((s) => s.id === id)) state.sources.push({ id, type, value: v, label: v, category: "", status: "pending", note: "" });
+    if (!state.sources.some((s) => s.id === id)) state.sources.push({ id, type, value: v, label: type === "playlist" && /list=|^(PL|UU|OL)[\w-]{10,}$/.test(v) ? "Course playlist" : v, category: "", status: "pending", note: "" });
     saveSources();
     $("#srcValue").value = "";
     $("#srcValue").blur();

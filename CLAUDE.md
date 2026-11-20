@@ -17,7 +17,7 @@ decisions and architecture; this file is the practical part: layout, commands, p
 | `web/src/rules.js` | Rule engine: compiled rules -> show / hide / pending per video; ranking; "Up next" similarity; starter rules with topic example phrases |
 | `web/src/youtube.js` | YouTube Data API v3 client (browser, user's key) |
 | `web/src/gemini.js` | Gemini API client: turns written rules into structured filters; optional topic checks; sorts channels into categories |
-| `web/src/subscriptions.js` | **The owner's YouTube subscriptions** (handles, names, category), taken once from YouTube's sidebar. Default sources; merged into existing browsers once per `SUBSCRIPTIONS_VERSION`. Public repo, so this list is public. |
+| `web/src/subscriptions.js` | **The owner's YouTube subscriptions** (handles, names, category), taken once from YouTube's sidebar, plus `MY_COURSES` (AI course playlists as search phrases: Stanford CS229/CS224N/CS231N/CS25, MIT 6.S191, Berkeley CS285, CMU 11-785, Karpathy Zero to Hero). Default sources; merged into existing browsers once per `SUBSCRIPTIONS_VERSION`. Public repo, so this list is public. |
 | `web/src/catalog.js` | Default categories (with example phrases for the on-device model) and the curated "suggested technical channels" list (handles from memory, not verified) |
 | `web/src/local-model.js`, `web/src/embed-worker.js` | On-device topic checks: all-MiniLM-L6-v2 via transformers.js in a Web Worker |
 | `web/test/e2e.cjs` | Headless-Chromium end-to-end test with stubbed YouTube/Gemini (real on-device model) |
@@ -33,7 +33,7 @@ npm ci                 # install (esbuild, @huggingface/transformers pinned to 4
 npm run fetch-model    # download the on-device model into web/models/ (gitignored; needs huggingface.co)
 npm run build          # -> web/dist/
 npm run dev            # watch + serve dist/ on :8080
-npm run test:e2e       # after build: 25 checks, exits non-zero on failure. Optional arg: screenshot dir
+npm run test:e2e       # after build: 31 checks, exits non-zero on failure. Optional arg: screenshot dir
 ```
 
 Always run `npm run build && npm run test:e2e` after changing `web/src`. Commit source only: **never commit
@@ -59,6 +59,12 @@ built output** (`dist/`, bundles, models). Pushing to the branch deploys via the
   phrases (similarity >= 0.36, `CATEGORY_MATCH` in main.js; scored lazily per category, in memory). "Search YouTube
   for more" runs a normal search for the category name. Channels without a category can be auto-sorted ("Sort
   unsorted"): Gemini if a key is set, else the on-device model on channel name + description.
+- **Course playlists** (source `type: "playlist"`): `value` is a search phrase or a playlist link. On first refresh a
+  phrase is resolved with `search.list type=playlist` (100 units, once; `playlistId`, `foundTitle`, `foundChannel` are
+  stored and shown on Sources so a wrong match can be replaced by a link). Each refresh reads up to 50 items (1 unit),
+  storing `source.position`. Lectures are kept out of the main feed grids, shown in a "Courses" section of their
+  category in playlist order, and "Up next" on a lecture continues the course. `savePool` keeps up to 600 course
+  videos outside the newest-1000 cut.
 - Feed refresh: channel ids are resolved once (`channels.list`, 1 unit per handle) and stored on the source; uploads
   come from the uploads playlist `"UU" + channelId.slice(2)` (1 unit per channel), 6 requests at a time.
 - localStorage keys: `ft.settings`, `ft.prefs` (rules text, compiled rules, mode, likes, watched, notInterested,

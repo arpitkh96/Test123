@@ -85,6 +85,24 @@ export function createYouTube(key, onUnits = () => {}) {
   return {
     details,
     channelsInfo,
+    /** Finds the best-matching playlist for a phrase (100 units; done once per course, then remembered). */
+    async findPlaylist(query) {
+      const r = await api("search", { part: "snippet", q: query, type: "playlist", maxResults: "1" }, 100);
+      const it = r.items?.[0];
+      if (!it) throw new YouTubeError(`No playlist found for “${query}”. Paste the playlist link instead.`, "notFound");
+      return { playlistId: it.id.playlistId, title: it.snippet.title, channel: it.snippet.channelTitle };
+    },
+    /** Title and channel of a playlist (1 unit). */
+    async playlistInfo(playlistId) {
+      const r = await api("playlists", { part: "snippet", id: playlistId });
+      const it = r.items?.[0];
+      return it ? { title: it.snippet.title, channel: it.snippet.channelTitle } : null;
+    },
+    /** Video ids of a playlist in playlist order (1 unit per 50). */
+    async playlistVideos(playlistId, max = 50) {
+      const r = await api("playlistItems", { part: "contentDetails", playlistId, maxResults: String(Math.min(max, 50)) });
+      return (r.items || []).map((it) => it.contentDetails.videoId);
+    },
     /** Latest uploads of a channel (1 unit): every channel's uploads playlist is its id with "UC" -> "UU". */
     async uploads(channelId, max = 10) {
       const r = await api("playlistItems", { part: "contentDetails", playlistId: "UU" + channelId.slice(2), maxResults: String(max) });
