@@ -80,6 +80,11 @@ const calls = { keys: new Set(), geminiTopic: 0, compile: 0, anthropic: 0 };
       return reply({ notes: "", topics: [{ name: "science", examples: ["science explained", "physics and astronomy", "how the universe works", "space telescopes and planets", "black holes and stars"] }],
         rules: [{ action: "block", text: "Hide Shorts", when: { is_short: true } }, { action: "block", text: "Hide science videos", when: { about: ["science"] } }, { action: "block", text: "Hide anything from Talks", when: { channels: ["Talks"] } }] });
     }
+    if (prompt.startsWith("Assign each YouTube channel")) {
+      calls.categorize = (calls.categorize || 0) + 1;
+      const ids = [...prompt.matchAll(/"id":"([^"]+)"/g)].map((m) => m[1]);
+      return reply({ results: ids.map((id) => ({ id, category: /rust|boilerplate/i.test(id) ? "rust" : "other" })) });
+    }
     calls.geminiTopic++;
     return reply({ results: [] });
   });
@@ -140,6 +145,14 @@ const calls = { keys: new Set(), geminiTopic: 0, compile: 0, anthropic: 0 };
   await pg.check('input[name="sugg"][value="@jonhoo"]');
   await pg.click('#suggForm button[type="submit"]');
   await pg.waitForTimeout(1500);
+  // Comma-separated channels: duplicates (already following @jonhoo) are skipped
+  await pg.goto(BASE + "#sources"); await pg.waitForTimeout(300);
+  const before = +(await pg.textContent("main")).match(/Following \((\d+)\)/)[1];
+  await pg.fill("#srcValue", "@letsgetrusty, https://www.youtube.com/@NoBoilerplate, @jonhoo");
+  await pg.click('#addForm button[type="submit"]');
+  await pg.waitForTimeout(1500);
+  const after = +(await pg.textContent("main")).match(/Following \((\d+)\)/)[1];
+  check("comma-separated channels added, duplicates skipped", after === before + 2, `${before} -> ${after}`);
   await pg.goto(BASE + "#cat=rust");
   await pg.waitForFunction(() => !/Finding matching/.test(document.querySelector("main").textContent), null, { timeout: 60000 });
   await pg.waitForTimeout(300);
@@ -169,6 +182,7 @@ const calls = { keys: new Set(), geminiTopic: 0, compile: 0, anthropic: 0 };
   check("Gemini key used for Gemini", calls.keys.has("gemini:AIzaGEMINI"));
   check("Gemini picked newest stable Flash-Lite", calls.geminiModel === "gemini-3.1-flash-lite", calls.geminiModel);
   check("on-device mode sends no topic checks to Gemini", calls.geminiTopic === 0, String(calls.geminiTopic));
+  check("new channels sorted by Gemini when a key is set", calls.categorize >= 1, String(calls.categorize));
   check("no requests to Anthropic", calls.anthropic === 0);
   check("no page errors", errors.length === 0, errors.join(" | "));
 

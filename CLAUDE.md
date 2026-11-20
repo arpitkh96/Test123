@@ -23,6 +23,7 @@ decisions and architecture; this file is the practical part: layout, commands, p
 | `web/test/e2e.cjs` | Headless-Chromium end-to-end test with stubbed YouTube/Gemini (real on-device model) |
 | `web/build.mjs`, `web/fetch-model.mjs` | Build (app + worker + model + ONNX wasm into `dist/`); model download |
 | `.github/workflows/pages.yml` | **The deploy.** On every push touching `web/`: `npm ci`, `npm run fetch-model` (cached), `npm run build`, publish `web/dist` to Pages. Requires Pages source = "GitHub Actions". |
+| `tools/handles-from-html.mjs` | Local helper for the user: saved YouTube sidebar HTML -> comma-separated `@handles` to paste into Sources -> Add channels (`node tools/handles-from-html.mjs file.html`, or stdin) |
 | `artifact/filtertube.html`, `tools/ingest.mjs` | **Superseded** first version: a claude.ai Artifact (https://claude.ai/artifact/UMMYkAda8aEgTNvSvjZg5M) fed by a Node ingest script. Kept for reference only. |
 
 ## Commands (run in `web/`)
@@ -32,7 +33,7 @@ npm ci                 # install (esbuild, @huggingface/transformers pinned to 4
 npm run fetch-model    # download the on-device model into web/models/ (gitignored; needs huggingface.co)
 npm run build          # -> web/dist/
 npm run dev            # watch + serve dist/ on :8080
-npm run test:e2e       # after build: 23 checks, exits non-zero on failure. Optional arg: screenshot dir
+npm run test:e2e       # after build: 25 checks, exits non-zero on failure. Optional arg: screenshot dir
 ```
 
 Always run `npm run build && npm run test:e2e` after changing `web/src`. Commit source only: **never commit
@@ -48,8 +49,10 @@ built output** (`dist/`, bundles, models). Pushing to the branch deploys via the
   Only `about` (topics like "politics", "clickbait") needs a model; everything else is plain code.
 - Topic checks (`settings.topicCheck`): `local` (default, on-device, scores in `ft.scores`, threshold by
   `settings.strictness`: strict 0.28 / balanced 0.34 / loose 0.42), `gemini` (booleans in `ft.labels`), or `off`.
-- There is deliberately **no import parser in the app** (user's choice): to update subscriptions, edit
-  `web/src/subscriptions.js` (parse what the user pastes, once) and bump `SUBSCRIPTIONS_VERSION`.
+- There is deliberately **no HTML parser in the app** (user's choice). Channels are added on the Sources page as a
+  comma-separated list of `@handles` / channel links (`channelList()` in main.js); the user gets that list from
+  their sidebar HTML with `tools/handles-from-html.mjs` on their own machine. The built-in subscription list is
+  `web/src/subscriptions.js` (bump `SUBSCRIPTIONS_VERSION` after editing it).
 - A video is `show`, `hide` (with reasons) or `pending` (strict mode: hidden until its topics are checked).
 - **Categories** (`ft.categories`, defaults in `catalog.js`): each source has one `category`. Feed chips (`#cat=<id>`) show
   videos from that category's channels **or** videos the on-device model matches to the category's example

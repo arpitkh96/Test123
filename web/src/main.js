@@ -186,6 +186,15 @@ async function refreshFeed() {
   render();
 }
 
+/** "@a, @b, youtube.com/@c, https://youtube.com/channel/UC…" -> ["@a", "@b", "@c", "UC…"] (comma/newline separated). */
+function channelList(text) {
+  return String(text).split(/[,\n]+/).map((x) => x.trim()).filter(Boolean).map((x) => {
+    const m = x.match(/youtube\.com\/(?:channel\/(UC[\w-]{22})|(@[\w.-]+)|c\/([\w.-]+)|user\/([\w.-]+))/i);
+    if (m) x = m[1] || m[2] || m[3] || m[4];
+    return /^UC[\w-]{22}$/.test(x) || x.startsWith("@") ? x : "@" + x.replace(/\s+/g, "");
+  });
+}
+
 /** Adds channels as sources (deduplicated) and sorts the new ones into categories. */
 async function addChannels(list, origin) {
   const have = new Set(state.sources.flatMap((s) => [String(s.value).toLowerCase(), String(s.channelId || "").toLowerCase()]));
@@ -632,12 +641,13 @@ function sourcesView() {
     </section>
 
     <section class="panel">
-      <h2>Add a single source</h2>
+      <h2>Add channels or a topic</h2>
       <form class="addform" id="addForm">
-        <select id="srcType" aria-label="Source type"><option value="channel">Channel</option><option value="topic">Topic</option><option value="trending">Trending in region</option></select>
-        <input id="srcValue" placeholder="@handle or channel link" aria-label="Channel, topic or region" required>
+        <select id="srcType" aria-label="Source type"><option value="channel">Channels</option><option value="topic">Topic</option><option value="trending">Trending in region</option></select>
+        <input id="srcValue" placeholder="@handle, @another, channel links… (comma separated)" aria-label="Channels, topic or region" required>
         <button class="btn" type="submit">Add</button>
       </form>
+      <p class="note">For channels, paste one or many, separated by commas: <code>@Fireship, @jonhoo, youtube.com/@ByteByteGo</code>. Channels you already follow are skipped, and new ones are sorted into categories automatically.</p>
     </section></div>`;
 }
 
@@ -737,13 +747,13 @@ document.addEventListener("submit", (e) => {
     let v = $("#srcValue").value.trim();
     if (!v) return;
     if (type === "channel") {
-      const m = v.match(/youtube\.com\/(?:channel\/(UC[\w-]{20,})|(@[\w.-]+)|c\/([\w.-]+)|user\/([\w.-]+))/i);
-      if (m) v = m[1] || m[2] || m[3] || m[4];
-      if (!v.startsWith("@") && !v.startsWith("UC")) v = "@" + v;
+      const list = channelList(v);
+      $("#srcValue").value = "";
+      if (list.length) addChannels(list.map((value) => ({ value, title: value })), "manual");
+      return;
     }
     if (type === "trending") v = v.toUpperCase().slice(0, 2);
     const id = type + "-" + critKey(v);
-    if (type === "channel") { $("#srcValue").value = ""; addChannels([{ value: v, title: v }], "manual"); return; }
     if (!state.sources.some((s) => s.id === id)) state.sources.push({ id, type, value: v, label: v, category: "", status: "pending", note: "" });
     saveSources();
     $("#srcValue").value = "";
