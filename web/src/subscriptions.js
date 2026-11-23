@@ -2,7 +2,7 @@
 // An empty category means "not sorted yet": the Sources page can sort those automatically.
 // Bump SUBSCRIPTIONS_VERSION after editing so browsers that already have FilterTube data merge in new entries.
 
-export const SUBSCRIPTIONS_VERSION = 2;
+export const SUBSCRIPTIONS_VERSION = 3;
 
 /** [handle, channel name, category id] */
 export const MY_SUBSCRIPTIONS = [
@@ -22,6 +22,25 @@ export const MY_SUBSCRIPTIONS = [
   ["@machinelearner9003", "MachineLearner", "ai"],
   ["@analyticsdiksha7024", "Analytics Diksha", "ai"],
   ["@AndrejKarpathy", "Andrej Karpathy", "ai"],
+  // Added on request (handles from memory, not checked against YouTube; unknown ones are flagged on refresh)
+  ["@TwoMinutePapers", "Two Minute Papers", "ai"],
+  ["@YannicKilcher", "Yannic Kilcher", "ai"],
+  ["@aiexplained-official", "AI Explained", "ai"],
+  ["@umarjamilai", "Umar Jamil", "ai"],
+  ["@statquest", "StatQuest", "ai"],
+  ["@samwitteveenai", "Sam Witteveen", "ai"],
+  ["@WelchLabsVideo", "Welch Labs", "ai"],
+  ["@howardjeremyp", "Jeremy Howard (fast.ai)", "ai"],
+  ["@lexfridman", "Lex Fridman", "ai"],
+  ["@DwarkeshPatel", "Dwarkesh Patel", "ai"],
+  ["@MachineLearningStreetTalk", "Machine Learning Street Talk", "ai"],
+  ["@GoogleDeepMind", "Google DeepMind", "ai"],
+  ["@OpenAI", "OpenAI", "ai"],
+  ["@anthropic-ai", "Anthropic", "ai"],
+  ["@HuggingFace", "Hugging Face", "ai"],
+  ["@stanfordonline", "Stanford Online", "ai"],
+  ["@mreflow", "Matt Wolfe", "ai"],
+  ["@matthew_berman", "Matthew Berman", "ai"],
   ["@The-Rest-of-Us", "The Rest Of Us", ""],
   ["@LinusTechTips", "Linus Tech Tips", "technews"],
 

@@ -151,7 +151,7 @@ const calls = { keys: new Set(), geminiTopic: 0, compile: 0, anthropic: 0 };
 
   // Add a suggested Rust channel; Rust chip appears and picks up the Rust video from another channel
   await pg.goto(BASE + "#sources"); await pg.waitForTimeout(300);
-  check("subscriptions listed on Sources", /Following \((9\d)\)/.test(await pg.textContent("main")));
+  check("subscriptions listed on Sources", /Following \((1\d\d)\)/.test(await pg.textContent("main")));
   await pg.check('input[name="sugg"][value="@jonhoo"]');
   await pg.click('#suggForm button[type="submit"]');
   await pg.waitForTimeout(1500);
